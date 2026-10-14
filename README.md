@@ -1,29 +1,30 @@
-<img width="253" height="430" alt="png2" src="https://github.com/user-attachments/assets/0ff3ac9d-31b3-4660-9b66-e48fe2ee6536" /># Plant Sales App (Flutter)
+# Plant Sales App (Flutter)
 
 Мобильное приложение для продаж средств защиты растений (СЗР). 
 Переписано с Python/Kivy на Flutter для Android.
 
 ## 📱 Скриншоты
 
-| До (Python/Kivy) | После (Flutter) |
-|:---:|:---:|
-| ![Диагностика](<img width="298" height="494" alt="png1" src="https://github.com/user-attachments/assets/a39476c9-29b0-4eb0-89e5-1d66d76a387c" /> ![Диагностика](<img width="253" height="430" alt="png2" src="https://github.com/user-attachments/assets/4c7a70ac-5445-428b-b90a-f702483cafc3" />
-)
-)  ![Каталог](<img width="241" height="402" alt="png3" src="https://github.com/user-attachments/assets/0cdd41b3-a404-4c33-a85d-0d5051ea8d6d" /> ![Каталог](<img width="253" height="417" alt="png4" src="https://github.com/user-attachments/assets/9bd45b4e-adf6-433e-86c7-98ac16b939bb" />
-<img width="253" height="417" alt="png4" src="https://github.com/user-attachments/assets/d74e765a-5352-4b42-a774-825f8a4094b9" />
-)
-![Каталог](<img width="253" height="417" alt="png4" src="https://github.com/user-attachments/assets/e4411786-6ffa-4783-a38d-b81810323390" />
+| До (Python/Kivy) и После (Flutter) |
+|:------:|
+|Python/Kivy|
+|Диагностика|
+| <img width="298" height="494" alt="png1" src="https://github.com/user-attachments/assets/a39476c9-29b0-4eb0-89e5-1d66d76a387c" /> 
+  <img width="253" height="430" alt="png2" src="https://github.com/user-attachments/assets/4c7a70ac-5445-428b-b90a-f702483cafc3" /> |
+|Каталог|
+|<img width="241" height="402" alt="png3" src="https://github.com/user-attachments/assets/0cdd41b3-a404-4c33-a85d-0d5051ea8d6d" /> 
 <img width="226" height="374" alt="png6" src="https://github.com/user-attachments/assets/50bd5506-6853-4c14-9046-f120fff72508" />
-)
-)  ![Настройки](<img width="253" height="417" alt="png4" src="https://github.com/user-attachments/assets/00f2aa7c-bb0b-421b-a790-9bd23a857b5b" />
-)
-) | ![Диагностика](<img width="1182" height="2560" alt="jpg4" src="https://github.com/user-attachments/assets/225d5441-6689-4889-80dc-49288b00ef74" />
-)  ![Каталог](<img width="1182" height="2560" alt="jpg2" src="https://github.com/user-attachments/assets/61f218a9-c7c3-4c96-bd2d-0c138ef228d9" />
-
-)  ![Каталог](<img width="1182" height="2560" alt="jpg1" src="https://github.com/user-attachments/assets/50eb53d8-2324-4a54-a658-a01eda53136c" />)
-) ![Настройки](<img width="1182" height="2560" alt="jpg3" src="https://github.com/user-attachments/assets/789e3653-4aee-4b18-a581-55a89047a64a" />) |
-
-
+|
+|Настройки|
+|<img width="253" height="417" alt="png4" src="https://github.com/user-attachments/assets/00f2aa7c-bb0b-421b-a790-9bd23a857b5b" />|
+|Flutter|
+|Диагностика|
+|<img width="1182" height="2560" alt="jpg4" src="https://github.com/user-attachments/assets/225d5441-6689-4889-80dc-49288b00ef74" />|
+|Каталог|
+| <img width="1182" height="2560" alt="jpg2" src="https://github.com/user-attachments/assets/61f218a9-c7c3-4c96-bd2d-0c138ef228d9" />
+  <img width="1182" height="2560" alt="jpg1" src="https://github.com/user-attachments/assets/50eb53d8-2324-4a54-a658-a01eda53136c" />)|
+|Настройки|
+|<img width="1182" height="2560" alt="jpg3" src="https://github.com/user-attachments/assets/789e3653-4aee-4b18-a581-55a89047a64a" />) |
 
 ## ✅ Реализовано
 
