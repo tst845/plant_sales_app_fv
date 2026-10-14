@@ -7,7 +7,8 @@
 
 | Диагностика | Каталог | Настройки |
 |:---:|:---:|:---:|
-| ![Диагностика](screenshots/diagnosis.png) | ![Каталог](screenshots/catalog.png) | ![Настройки](screenshots/settings.png) |
+| ![Диагностика](<img width="298" height="494" alt="png1" src="https://github.com/user-attachments/assets/cb7342f7-dfcf-439d-8c81-43e740a986ea" />
+) | ![Каталог](screenshots/catalog.png) | ![Настройки](screenshots/settings.png) |
 
 
 ## ✅ Реализовано
