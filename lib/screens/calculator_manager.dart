@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../models/product.dart';
 import 'dart:math' as math;
 import '../models/order.dart';
+import 'order_manager.dart';
 
 class CalcItem {
   final int productId;
@@ -50,10 +51,10 @@ class CalcItem {
   String get packageUnit {
     if (packageStr == null) return 'ед.';
     final lower = packageStr!.toLowerCase();
-    if (lower.contains('л')) return 'л';
-    if (lower.contains('кг')) return 'кг';
+    if (lower.contains('мл')) return 'мл'; // Проверяем мл до л
+    if (lower.contains('кг')) return 'кг'; // Проверяем кг до г
     if (lower.contains('г')) return 'г';
-    if (lower.contains('мл')) return 'мл';
+    if (lower.contains('л')) return 'л';
     return 'ед.';
   }
 
@@ -154,7 +155,7 @@ class CalculatorManager {
     }).toList();
     
     items.value = newItems;
-    isSyncedWithCalculator.value = true;
+    OrderManager.instance.isSyncedWithCalculator.value = true;
   }
 
   void toggleMode(bool isArea) {

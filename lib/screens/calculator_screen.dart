@@ -273,7 +273,6 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
       
       OrderManager.instance.startNewOrder();
       OrderManager.instance.isSyncedWithCalculator.value = true;
-      CalculatorManager.instance.isSyncedWithCalculator.value = true;
       
       final newItems = calcItems.map((c) => OrderItem(
         productId: c.productId,

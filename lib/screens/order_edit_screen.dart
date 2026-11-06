@@ -6,6 +6,8 @@ import '../models/product.dart';
 import '../main.dart';
 import 'order_manager.dart';
 import 'calculator_manager.dart';
+import 'sync_dialog.dart';
+import 'catalog_screen.dart';
 
 class OrderEditScreen extends StatefulWidget {
   final Order? order;
@@ -84,7 +86,11 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
       } else {
         await DatabaseHelper.instance.updateOrder(newOrder);
       }
-      OrderManager.instance.clearActiveOrder(); // Очищаем черновик
+
+      final wasSynced = OrderManager.instance.isSyncedWithCalculator.value;
+      OrderManager.instance.clearActiveOrder();
+      if (wasSynced) CalculatorManager.instance.clearAll(); // Очищаем черновик
+      
       if (mounted) Navigator.pop(context, true);
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка сохранения: $e')));
@@ -111,40 +117,116 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
     }
   }
 
-  void _addFromCalculator() {
+  Future<void> _addFromCatalog() async {
+    // 1. Открываем каталог в режиме выбора. Он вернет List<Product>
+    final List<Product>? selectedProducts = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => const CatalogScreen(isOrderSelectionMode: true),
+      ),
+    );
+
+    if (selectedProducts == null || selectedProducts.isEmpty) return;
+
+    final currentList = currentItems;
+    final List<OrderItem> newList = List.from(currentList);
+    final List<String> skippedNames = [];
+
+    // 2. Проходим по выбранным продуктам
+    for (var p in selectedProducts) {
+      final exists = currentList.any((item) => item.productId == p.id);
+      
+      if (exists) {
+        // Вариант А: Препарат уже есть, запоминаем имя для уведомления
+        skippedNames.add(p.name);
+      } else {
+        // Парсим норму расхода
+        double rate = 1.0;
+        if (p.consumptionRate != null && p.consumptionRate!.isNotEmpty) {
+          final match = RegExp(r'(\d+[.,]?\d*)').firstMatch(p.consumptionRate!);
+          if (match != null) {
+            rate = double.tryParse(match.group(1)!.replaceAll(',', '.')) ?? 1.0;
+          }
+        }
+
+        // Парсим упаковку
+        double packageVolume = 1.0;
+        String packageUnit = 'ед.';
+        if (p.package != null && p.package!.isNotEmpty) {
+          final matchVol = RegExp(r'(\d+([.,]\d+)?)').firstMatch(p.package!);
+          if (matchVol != null) {
+            packageVolume = double.tryParse(matchVol.group(1)!.replaceAll(',', '.')) ?? 1.0;
+          }
+          final lower = p.package!.toLowerCase();
+          if (lower.contains('мл')) {
+            packageUnit = 'мл';
+          } else if (lower.contains('кг')) {
+            packageUnit = 'кг';
+          } else if (lower.contains('г')) {
+            packageUnit = 'г';
+          } else if (lower.contains('л')) {
+            packageUnit = 'л';
+          }
+        }
+
+        // Создаем новый OrderItem и добавляем
+        newList.add(OrderItem(
+          productId: p.id,
+          productName: p.name,
+          basePrice: p.price ?? 0.0,
+          discountPercent: 0.0,
+          rate: rate,
+          area: 1.0, // По умолчанию 1 га
+          packageVolume: packageVolume,
+          packageUnit: packageUnit,
+        ));
+      }
+    }
+
+    // 3. Обновляем данные в менеджере
+    if (newList.length > currentList.length) {
+      OrderManager.instance.updateItems(newList);
+      
+      // Синхронизируем с калькулятором, если включено
+      if (OrderManager.instance.isSyncedWithCalculator.value) {
+        CalculatorManager.instance.syncWithOrderItems(newList);
+      }
+      setState(() {}); // Перерисовываем экран
+    }
+
+    // 4. Выводим сообщение, если были пропущены дубликаты
+    if (skippedNames.isNotEmpty && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Уже есть в заказе: ${skippedNames.join(", ")}'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+    }
+  }
+
+  Future<void> _addFromCalculator() async {
     final calcItems = CalculatorManager.instance.items.value;
     if (calcItems.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('В калькуляторе нет препаратов')));
       return;
     }
 
-    // Включаем синхронизацию
-    OrderManager.instance.isSyncedWithCalculator.value = true;
+    final order = OrderManager.instance.activeOrder.value;
+    if (order == null) return;
 
-    List<OrderItem> current = List.from(currentItems);
+    final mergedItems = await showDialog<List<OrderItem>>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => SyncDialog(calcItems: calcItems, orderItems: order.items),
+    );
 
-    for (var c in calcItems) {
-      final existingIdx = current.indexWhere((i) => i.productId == c.productId);
-      final newItem = OrderItem(
-        productId: c.productId,
-        productName: c.name,
-        basePrice: c.basePrice,
-        discountPercent: c.percent ?? 0.0,
-        rate: c.rate,
-        area: c.area,
-        packageVolume: c.packageVolume,
-        packageUnit: c.packageUnit,
-      );
-
-      if (existingIdx != -1) {
-        current[existingIdx] = newItem;
-      } else {
-        current.add(newItem);
-      }
+    if (mergedItems != null) {
+      OrderManager.instance.updateItems(mergedItems);
+      CalculatorManager.instance.syncWithOrderItems(mergedItems);
+      OrderManager.instance.isSyncedWithCalculator.value = true;
+      setState(() {}); // Обновляем UI
     }
-    
-    OrderManager.instance.updateItems(current);
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Данные из калькулятора добавлены и синхронизированы')));
   }
 
   Future<void> _loadToCalculator() async {
@@ -153,22 +235,8 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
       return;
     }
 
-    CalculatorManager.instance.clearAll();
-    final allProducts = await DatabaseHelper.instance.getAllProducts();
-    
-    for (var item in currentItems) {
-      Product? product;
-      try {
-        product = allProducts.firstWhere((p) => p.id == item.productId);
-      } catch (_) {}
-
-      if (product != null) {
-        CalculatorManager.instance.addProduct(product);
-        CalculatorManager.instance.updatePercent(product.id!, item.discountPercent.toString());
-        CalculatorManager.instance.updateRate(product.id!, item.rate.toString());
-        CalculatorManager.instance.updateArea(product.id!, item.area.toString());
-      }
-    }
+    CalculatorManager.instance.syncWithOrderItems(currentItems);
+    OrderManager.instance.isSyncedWithCalculator.value = true;
     
     if (mounted) {
       mainScreenTabNotifier.value = 1; // Переход на вкладку калькулятора
@@ -293,9 +361,7 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
             runSpacing: 8,
             children: [
               ElevatedButton.icon(
-                onPressed: () {
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Переход в каталог (в разработке)')));
-                },
+                onPressed: _addFromCatalog,
                 icon: const Icon(Icons.list_alt),
                 label: const Text('Из каталога'),
               ),
@@ -328,11 +394,17 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
                    var newList = List<OrderItem>.from(currentItems);
                    newList[idx] = updatedItem;
                    OrderManager.instance.updateItems(newList);
+                   if (OrderManager.instance.isSyncedWithCalculator.value) {
+                      CalculatorManager.instance.syncWithOrderItems(newList);
+                    }
                 },
                 onDelete: () {
                    var newList = List<OrderItem>.from(currentItems);
                    newList.removeAt(idx);
                    OrderManager.instance.updateItems(newList);
+                   if (OrderManager.instance.isSyncedWithCalculator.value) {
+                      CalculatorManager.instance.syncWithOrderItems(newList);
+                    }
                 },
               );
             }),

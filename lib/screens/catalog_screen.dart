@@ -8,6 +8,7 @@ import '../models/product.dart';
 import 'product_form_screen.dart';
 import 'calculator_manager.dart';
 import '../services/filter_manager.dart';
+import '../models/order.dart';
 
 class CatalogFilter {
   Set<String> categories = {};
@@ -88,23 +89,25 @@ class CatalogFilter {
 }
 
 class CatalogScreen extends StatefulWidget {
-  
-  final bool autoSelectMode; // <-- ДОБАВИТЬ
+  final bool isOrderSelectionMode; // Флаг режима выбора для заказа
 
-  const CatalogScreen({super.key, this.autoSelectMode = false}); // <-- ОБНОВИТЬ
+  const CatalogScreen({super.key, this.isOrderSelectionMode = false});
 
   @override
   State<CatalogScreen> createState() => _CatalogScreenState();
 }
 
+
 class _CatalogScreenState extends State<CatalogScreen> {
   List<Product> _products = [];
   bool _isLoading = true;
   String _searchQuery = '';
+  String? _selectedCategory;
   final FocusNode _searchFocusNode = FocusNode();
   final TextEditingController _searchController = TextEditingController();
   final CatalogFilter _filter = CatalogFilter();
-  
+    // Множество для хранения ID выбранных препаратов
+  final Set<int> _selectedProductIds = {};
   List<String> _categories = [];
   List<String> _availableCultures = [];
   List<String> _availableDiseases = [];
@@ -137,7 +140,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
     DatabaseHelper.dbUpdateTrigger.addListener(_onDbUpdate); // <-- Добавляем слушатель
     FilterManager.instance.applyTrigger.addListener(_onApplyExternalFilters);
     // Если пришли из заказа с флагом, сразу включаем режим выбора
-    if (widget.autoSelectMode) {
+    if (widget.isOrderSelectionMode) {
       _isSelectionMode = true;
       _isSelectionConfirmed = false;
     }
@@ -663,6 +666,49 @@ class _CatalogScreenState extends State<CatalogScreen> {
     );
   }
 
+  // --- Метод конвертации Product в OrderItem ---
+  OrderItem _createOrderItem(Product p) {
+    // 1. Парсим норму расхода
+    double rate = 1.0;
+    if (p.consumptionRate != null && p.consumptionRate!.isNotEmpty) {
+      final match = RegExp(r'(\d+[.,]?\d*)').firstMatch(p.consumptionRate!);
+      if (match != null) {
+        rate = double.tryParse(match.group(1)!.replaceAll(',', '.')) ?? 1.0;
+      }
+    }
+
+    // 2. Парсим упаковку
+    double packageVolume = 1.0;
+    String packageUnit = 'ед.';
+    if (p.package != null && p.package!.isNotEmpty) {
+      final matchVol = RegExp(r'(\d+([.,]\d+)?)').firstMatch(p.package!);
+      if (matchVol != null) {
+        packageVolume = double.tryParse(matchVol.group(1)!.replaceAll(',', '.')) ?? 1.0;
+      }
+      final lower = p.package!.toLowerCase();
+      if (lower.contains('мл')) {
+        packageUnit = 'мл';
+      } else if (lower.contains('кг')) {
+        packageUnit = 'кг';
+      } else if (lower.contains('г')) {
+        packageUnit = 'г';
+      } else if (lower.contains('л')) {
+        packageUnit = 'л';
+      }
+    }
+
+    return OrderItem(
+      productId: p.id,
+      productName: p.name,
+      basePrice: p.price ?? 0.0,
+      discountPercent: 0.0,
+      rate: rate,
+      area: 1.0, // По умолчанию 1 га
+      packageVolume: packageVolume,
+      packageUnit: packageUnit,
+    );
+  }
+
   // ============================================================
   // ОСНОВНОЙ BUILD
   // ============================================================
@@ -825,68 +871,66 @@ class _CatalogScreenState extends State<CatalogScreen> {
                             padding: const EdgeInsets.all(8),
                             itemCount: filtered.length,
                             itemBuilder: (context, index) {
-                              return _buildProductCard(filtered[index], calcItems, isAreaMode);
-                            },
+                              return _buildProductCard(filtered[index], calcItems, isAreaMode); 
+                              },
                           ),
               );
             },
           );
         },
       ),
-      floatingActionButton: _isSelectionConfirmed && _selectedIds.isNotEmpty
+            floatingActionButton: _isSelectionConfirmed && _selectedIds.isNotEmpty
           ? Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
-                // 1. Кнопка ЭКСПОРТ
-                FloatingActionButton.extended(
-                  heroTag: 'export_fab',
-                  onPressed: () {
-                    final selectedProducts = _products.where((p) => _selectedIds.contains(p.id)).toList();
-                    _exportProductsToExcel(selectedProducts, 'Выбранные препараты');
-                  },
-                  icon: const Icon(Icons.download),
-                  label: Text('Экспорт (${_selectedIds.length})'),
-                  backgroundColor: Colors.blue.shade700,
-                  foregroundColor: Colors.white,
-                ),
-                const SizedBox(height: 12),
-                
-                // 2. Кнопка В КАЛЬКУЛЯТОР
-                FloatingActionButton.extended(
-                  heroTag: 'calc_fab',
-                  onPressed: () {
-                    int added = 0;
-                    for (var id in _selectedIds) {
-                      final p = _products.firstWhere((element) => element.id == id);
-                      if (CalculatorManager.instance.addProduct(p)) added++;
-                    }
-                    // Сбрасываем режим выбора
-                    setState(() {
-                      _isSelectionMode = false;
-                      _isSelectionConfirmed = false;
-                      _selectedIds.clear();
-                    });
-                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Добавлено в калькулятор: $added')));
-                  },
-                  icon: const Icon(Icons.calculate),
-                  label: Text('В калькулятор (${_selectedIds.length})'),
-                  backgroundColor: Colors.green.shade600,
-                  foregroundColor: Colors.white,
-                ),
-                const SizedBox(height: 12),
+                // Скрываем экспорт, если мы в режиме выбора для заказа
+                if (!widget.isOrderSelectionMode) ...[
+                  FloatingActionButton.extended(
+                    heroTag: 'export_fab',
+                    onPressed: () {
+                      final selectedProducts = _products.where((p) => _selectedIds.contains(p.id)).toList();
+                      _exportProductsToExcel(selectedProducts, 'Выбранные препараты');
+                    },
+                    icon: const Icon(Icons.download),
+                    label: Text('Экспорт (${_selectedIds.length})'),
+                    backgroundColor: Colors.blue.shade700,
+                    foregroundColor: Colors.white,
+                  ),
+                  const SizedBox(height: 12),
+                  FloatingActionButton.extended(
+                    heroTag: 'calc_fab',
+                    onPressed: () {
+                      int added = 0;
+                      for (var id in _selectedIds) {
+                        final p = _products.firstWhere((element) => element.id == id);
+                        if (CalculatorManager.instance.addProduct(p)) added++;
+                      }
+                      setState(() {
+                        _isSelectionMode = false;
+                        _isSelectionConfirmed = false;
+                        _selectedIds.clear();
+                      });
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Добавлено в калькулятор: $added')));
+                    },
+                    icon: const Icon(Icons.calculate),
+                    label: Text('В калькулятор (${_selectedIds.length})'),
+                    backgroundColor: Colors.green.shade600,
+                    foregroundColor: Colors.white,
+                  ),
+                  const SizedBox(height: 12),
+                ],
 
-                // 3. Кнопка В ЗАКАЗ (НОВАЯ)
+                // Кнопка подтверждения (В заказ / Добавить)
                 FloatingActionButton.extended(
                   heroTag: 'order_fab',
                   onPressed: () {
                     final selectedProducts = _products.where((p) => _selectedIds.contains(p.id)).toList();
-                    // Возвращаем список продуктов туда, откуда пришли (в OrderEditScreen)
-                    Navigator.pop(context, selectedProducts);
+                    Navigator.pop(context, selectedProducts); // Возвращаем List<Product>
                   },
-                  icon: const Icon(Icons.receipt_long),
-                  label: Text('В заказ (${_selectedIds.length})'),
-                  backgroundColor: Colors.orange.shade800,
+                  icon: const Icon(Icons.check),
+                  label: Text(widget.isOrderSelectionMode ? 'Добавить (${_selectedIds.length})' : 'В заказ (${_selectedIds.length})'),
+                  backgroundColor: widget.isOrderSelectionMode ? Colors.green.shade600 : Colors.orange.shade800,
                   foregroundColor: Colors.white,
                 ),
               ],
@@ -897,8 +941,8 @@ class _CatalogScreenState extends State<CatalogScreen> {
                     final res = await Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (context) => const CatalogScreen(autoSelectMode: true),
-                      ),
+                        builder: (context) => const ProductFormScreen(),  
+                        ),
                     );
                     if (res  == true) _loadData();
                   },
