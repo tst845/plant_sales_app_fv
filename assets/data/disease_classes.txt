@@ -1,0 +1,27 @@
+0 alternaria_leaf_spot_apple Альтернариоз яблони
+1 apple scab Парша яблони
+2 bacterial_spot_peach Бактериальная пятнистость персика
+3 bacterial_spot_pepper Бактериальная пятнистость перца
+4 bacterial_spot_tomato Бактериальная пятнистость томата
+5 black rot Чёрная гниль
+6 brown_spot_apple Бурая пятнистость яблони
+7 cedar_apple_rust Ржавчина можжевельника-яблони
+8 common_rust_corn Обычная ржавчина кукурузы
+9 early blight Фитофтороз ранний
+10 esca (black measles) Эска (чёрная пятнистость)
+11 gray_leaf_spot_corn Серая листовая пятнистость кукурузы
+12 gray_spot_apple Серая пятнистость яблони
+13 healthy Здоровое растение
+14 late blight Фитофтороз поздний
+15 leaf blight (isariopsis leaf spot)
+16 leaf scorch Листовая пятнистость (изариопсис)
+17 leaf_mold_tomato Листовой ожог Листовая плесень томата
+18 northern_leaf_blight_corn Северная листовая пятнистость кукурузы
+19 powdery_mildew Мучнистая роса
+20 scab Парша
+21 septoria_leaf_spot_tomato Септориоз томата
+22 spider mites two-spotted spider mite Паутинный клещ
+23 target spot Целевая пятнистость
+24 tomato yellow leaf curl virus Вирус желтой курчавости листьев томата
+25 tomato_mosaic_virus Вирус мозаики томата
+26 unknown Неизвестно

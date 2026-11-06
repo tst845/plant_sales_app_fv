@@ -1,0 +1,12 @@
+0 Apple Яблоня
+1 Bell_pepper Сладкий перец
+2 Cherry Вишня
+3 Corn Кукуруза
+4 Grape Виноград
+5 Peach Персик
+6 Potato Картофель
+7 Squash Тыква
+8 Strawberry Клубника
+9 Tomato Томат
+10 unknown_object Неизвестный объект
+11 unknown_plant Неизвестное растение

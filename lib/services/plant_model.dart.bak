@@ -1,0 +1,341 @@
+import 'dart:math' as math;
+import 'dart:typed_data';
+import 'package:flutter/services.dart';
+import 'package:image/image.dart' as img;
+import 'package:onnxruntime_v2/onnxruntime_v2.dart';
+
+class PlantModel {
+  static final PlantModel instance = PlantModel._internal();
+  PlantModel._internal();
+
+  OrtSession? _segSession;
+  OrtSession? _clsSession;
+  bool isLoaded = false;
+
+  final Map<int, String> speciesRu = {};
+  final Map<int, String> diseaseRu = {};
+
+  final double threshold = 0.9;
+  String? loadError; // Добавьте переменную в класс
+  
+  Future<bool> loadModels() async {
+    try {
+      OrtEnv.instance.init();
+      
+      // Загрузка моделей
+      final segData = await rootBundle.load('assets/models/segmentation_model.onnx');
+      final clsData = await rootBundle.load('assets/models/model_classifier.onnx');
+      
+      final sessionOptions = OrtSessionOptions();
+      _segSession = OrtSession.fromBuffer(segData.buffer.asUint8List(), sessionOptions);
+      _clsSession = OrtSession.fromBuffer(clsData.buffer.asUint8List(), sessionOptions);
+      
+      // Загрузка текстовых классов
+      await _loadClassesFromTxt();
+      
+      isLoaded = true;
+      return true;
+    } catch (e) {
+      loadError = e.toString(); // Сохраняем ошибку
+      print('Ошибка загрузки моделей: $e');
+      isLoaded = false;
+      return false;
+    }
+  }
+
+  Future<void> _loadClassesFromTxt() async {
+    try {
+      final speciesTxt = await rootBundle.loadString('assets/data/species_classes.txt');
+      final diseaseTxt = await rootBundle.loadString('assets/data/disease_classes.txt');
+
+      speciesRu.addAll(_parseTxt(speciesTxt));
+      diseaseRu.addAll(_parseTxt(diseaseTxt));
+    } catch (e) {
+      print('Ошибка чтения txt: $e');
+    }
+  }
+
+  Map<int, String> _parseTxt(String content) {
+    final Map<int, String> result = {};
+    final lines = content.split('\n');
+    
+    for (var line in lines) {
+      line = line.trim();
+      if (line.isEmpty) continue;
+      
+      // Пытаемся найти ID (первое число) и русское название (последнее слово/фраза)
+      final match = RegExp(r'^(\d+)\s+.*?\s+([А-Яа-яёЁ].*)$').firstMatch(line);
+      if (match != null) {
+        final id = int.tryParse(match.group(1)!);
+        final ruName = match.group(2)?.trim();
+        if (id != null && ruName != null) {
+          result[id] = ruName;
+        }
+      } else {
+        // Если русский перевод не найден (как в строке 15), берем просто ID
+        final idMatch = RegExp(r'^(\d+)').firstMatch(line);
+        if (idMatch != null) {
+           final id = int.tryParse(idMatch.group(1)!);
+           if (id != null) result[id] = line.substring(idMatch.end).trim(); 
+        }
+      }
+    }
+    return result;
+  }
+
+  // Функция Letterboxing: делает изображение квадратным, добавляя черные поля
+  img.Image _padToSquare(img.Image image) {
+    final int width = image.width;
+    final int height = image.height;
+
+    if (width == height) return image; // Уже квадрат
+
+    final int size = math.max(width, height);
+    final int padX = (size - width) ~/ 2;
+    final int padY = (size - height) ~/ 2;
+
+    // Создаем черный квадрат
+    final square = img.Image(width: size, height: size);
+    img.fill(square, color: img.ColorRgb8(0, 0, 0)); // Заливаем черным
+
+    // Копируем оригинал в центр
+    img.compositeImage(square, image, dstX: padX, dstY: padY);
+    return square;
+  }
+
+
+  // Подготовка изображения (Resize + Нормализация + CHW)
+  Float32List _preprocessImage(img.Image image) {
+    // 1. Сначала применяем Letterboxing
+    final squareImage = _padToSquare(image);
+    
+    // 2. Теперь сжимаем до 512x512
+    final resized = img.copyResize(squareImage, width: 512, height: 512);
+    
+    final mean = [0.485, 0.456, 0.406];
+    final std = [0.229, 0.224, 0.225];
+    
+    final Float32List tensor = Float32List(3 * 512 * 512);
+    
+    for (int y = 0; y < 512; y++) {
+      for (int x = 0; x < 512; x++) {
+        final pixel = resized.getPixel(x, y);
+        final r = (pixel.r / 255.0 - mean[0]) / std[0];
+        final g = (pixel.g / 255.0 - mean[1]) / std[1];
+        final b = (pixel.b / 255.0 - mean[2]) / std[2];
+        
+        final idx = y * 512 + x;
+        tensor[idx] = r;
+        tensor[512 * 512 + idx] = g;
+        tensor[2 * 512 * 512 + idx] = b;
+      }
+    }
+    return tensor;
+  }
+
+  Future<Map<String, dynamic>> predict(Uint8List imageBytes) async {
+    if (!isLoaded || _segSession == null || _clsSession == null) {
+      throw Exception('Модели не загружены');
+    }
+
+    final originalImage = img.decodeImage(imageBytes);
+    if (originalImage == null) throw Exception('Не удалось прочитать изображение');
+
+    // 1. Сегментация
+    final segInputList = _preprocessImage(originalImage);
+    final segInputTensor = OrtValueTensor.createTensorWithDataList(
+      segInputList, [1, 3, 512, 512]
+    );
+
+    final segInputs = {'input_rgb': segInputTensor};
+    final segOutputs = await _segSession!.runAsync(OrtRunOptions(), segInputs);
+    
+    if (segOutputs == null || segOutputs.length < 2) {
+      throw Exception('Ошибка инференса сегментации');
+    }
+
+    // ИСПРАВЛЕНИЕ: Приводим к OrtValueTensor и берем value
+    final leafMaskTensor = segOutputs[0] as OrtValueTensor;
+    final diseaseMaskTensor = segOutputs[1] as OrtValueTensor;
+
+    final leafMaskNested = leafMaskTensor.value as List;
+    final diseaseMaskNested = diseaseMaskTensor.value as List;
+
+    // Преобразуем вложенные списки в плоский Float32List
+    final leafMaskList = Float32List.fromList(
+      _flattenList(leafMaskNested).cast<double>()
+    );
+    final diseaseMaskList = Float32List.fromList(
+      _flattenList(diseaseMaskNested).cast<double>()
+    );
+
+    segInputTensor.release();
+    for (var element in segOutputs) { element?.release(); }
+
+     // 2. Классификация (5 каналов)
+    final clsInputList = Float32List(5 * 512 * 512);
+    clsInputList.setRange(0, 3 * 512 * 512, segInputList);
+    clsInputList.setRange(3 * 512 * 512, 4 * 512 * 512, leafMaskList);
+    clsInputList.setRange(4 * 512 * 512, 5 * 512 * 512, diseaseMaskList);
+
+    final clsInputTensor = OrtValueTensor.createTensorWithDataList(
+      clsInputList, [1, 5, 512, 512]
+    );
+
+    final clsInputs = {'input': clsInputTensor};
+    final clsOutputs = await _clsSession!.runAsync(OrtRunOptions(), clsInputs);
+    
+    if (clsOutputs == null || clsOutputs.length < 2) {
+      throw Exception('Ошибка инференса классификации');
+    }
+
+    // ИСПРАВЛЕНИЕ: Приводим к OrtValueTensor и берем value
+    final speciesLogitsTensor = clsOutputs[0] as OrtValueTensor;
+    final diseaseLogitsTensor = clsOutputs[1] as OrtValueTensor;
+
+    final speciesLogitsRaw = speciesLogitsTensor.value as List;
+    final diseaseLogitsRaw = diseaseLogitsTensor.value as List;
+
+    final speciesLogits = Float32List.fromList(
+      _flattenList(speciesLogitsRaw).cast<double>()
+    );
+    final diseaseLogits = Float32List.fromList(
+      _flattenList(diseaseLogitsRaw).cast<double>()
+    );
+
+    clsInputTensor.release();
+    for (var element in clsOutputs) { element?.release(); }
+
+    // 3. Обработка результатов
+    final speciesProbs = _softmax(speciesLogits);
+    final diseaseProbs = _softmax(diseaseLogits);
+
+    int speciesIdx = _argmax(speciesProbs);
+    double speciesConf = speciesProbs[speciesIdx];
+
+    int diseaseIdx = _argmax(diseaseProbs);
+    double diseaseConf = diseaseProbs[diseaseIdx];
+
+    String speciesText;
+    if (speciesConf >= threshold) {
+      speciesText = '${speciesRu[speciesIdx] ?? "Вид $speciesIdx"} (${(speciesConf * 100).toStringAsFixed(1)}%)';
+    } else {
+      final top3 = _getTopK(speciesProbs, 3);
+      speciesText = 'Не уверен, возможные варианты:\n' + 
+          top3.map((e) => '${speciesRu[e.$1] ?? "Вид ${e.$1}"} (${(e.$2 * 100).toStringAsFixed(1)}%)').join('\n');
+    }
+
+    String diseaseText;
+    if (diseaseConf >= threshold) {
+      diseaseText = '${diseaseRu[diseaseIdx] ?? "Болезнь $diseaseIdx"} (${(diseaseConf * 100).toStringAsFixed(1)}%)';
+    } else {
+      final top3 = _getTopK(diseaseProbs, 3);
+      diseaseText = 'Не уверен, возможные варианты:\n' + 
+          top3.map((e) => '${diseaseRu[e.$1] ?? "Болезнь ${e.$1}"} (${(e.$2 * 100).toStringAsFixed(1)}%)').join('\n');
+    }
+
+    final maskOverlayBytes = _generateMaskOverlay(originalImage, leafMaskList, diseaseMaskList);
+
+    return {
+      'species': speciesText,
+      'disease': diseaseText,
+      'species_conf': speciesConf,
+      'disease_conf': diseaseConf,
+      'species_idx': speciesIdx,
+      'disease_idx': diseaseIdx,
+      'species_probs': speciesProbs.toList(),   // Возвращаем как обычный List для удобства
+      'disease_probs': diseaseProbs.toList(),
+      'mask_overlay': maskOverlayBytes,         // <-- НОВОЕ
+    };
+  }
+
+  Float32List _softmax(Float32List logits) {
+    double maxVal = logits.reduce((a, b) => a > b ? a : b);
+    double sum = 0;
+    final exps = Float32List(logits.length);
+    for (int i = 0; i < logits.length; i++) {
+      exps[i] = math.exp(logits[i] - maxVal); // Исправлено на math.exp
+      sum += exps[i];
+    }
+    for (int i = 0; i < logits.length; i++) {
+      exps[i] /= sum;
+    }
+    return exps;
+  }
+
+  int _argmax(Float32List arr) {
+    int maxIdx = 0;
+    double maxVal = arr[0];
+    for (int i = 1; i < arr.length; i++) {
+      if (arr[i] > maxVal) { maxVal = arr[i]; maxIdx = i; }
+    }
+    return maxIdx;
+  }
+
+  List<(int, double)> _getTopK(Float32List probs, int k) {
+    final list = List.generate(probs.length, (i) => (i, probs[i]));
+    list.sort((a, b) => b.$2.compareTo(a.$2));
+    return list.take(k).toList();
+  }
+
+  // Рекурсивная функция для преобразования вложенных списков в одномерный список
+  List<double> _flattenList(dynamic list) {
+    final List<double> result = [];
+    if (list is List) {
+      for (var item in list) {
+        result.addAll(_flattenList(item));
+      }
+    } else if (list is double) {
+      result.add(list);
+    } else if (list is int) {
+      result.add(list.toDouble());
+    } else if (list is num) {
+      result.add(list.toDouble());
+    }
+    return result;
+  }
+
+  // Генерация прозрачного PNG с масками, размером с оригинальное фото
+  Uint8List _generateMaskOverlay(img.Image original, Float32List leafMask, Float32List diseaseMask) {
+    final int origW = original.width;
+    final int origH = original.height;
+    
+    // Вычисляем параметры Letterboxing (как в _padToSquare)
+    final int size = math.max(origW, origH);
+    final int padX = (size - origW) ~/ 2;
+    final int padY = (size - origH) ~/ 2;
+
+    // Создаем пустое прозрачное изображение размером с оригинал
+    final overlay = img.Image(width: origW, height: origH, numChannels: 4);
+
+    // Проходим по каждому пикселю оригинала
+    for (int y = 0; y < origH; y++) {
+      for (int x = 0; x < origW; x++) {
+        // Координаты в квадрате (с учетом паддинга)
+        int px = padX + x;
+        int py = padY + y;
+
+        // Координаты в тензоре 512x512
+        int mx = ((px / size) * 512).clamp(0, 511).toInt();
+        int my = ((py / size) * 512).clamp(0, 511).toInt();
+        int mIdx = my * 512 + mx;
+
+        bool isLeaf = leafMask[mIdx] > 0.5;
+        bool isDisease = diseaseMask[mIdx] > 0.5;
+
+        if (isDisease) {
+          // Красный цвет, альфа-канал 150 (из 255)
+          overlay.setPixelRgba(x, y, 255, 0, 0, 150);
+        } else if (isLeaf) {
+          // Зеленый цвет, альфа-канал 100
+          overlay.setPixelRgba(x, y, 0, 255, 0, 100);
+        }
+      }
+    }
+
+    // Кодируем в PNG
+    return Uint8List.fromList(img.encodePng(overlay));
+  }
+
+
+}

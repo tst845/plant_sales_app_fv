@@ -1,10 +1,97 @@
 // lib/screens/catalog_screen.dart
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:excel/excel.dart' hide Border;
 import '../database/database_helper.dart';
 import '../models/product.dart';
+import 'product_form_screen.dart';
+import 'calculator_manager.dart';
+import '../services/filter_manager.dart';
+
+class CatalogFilter {
+  Set<String> categories = {};
+  Set<String> cultures = {};
+  Set<String> diseases = {};
+  double? minPrice;
+  double? maxPrice;
+  String sortBy = 'name';
+  bool sortAscending = true;
+  bool sortByCalculator = false; // НОВОЕ: Сортировка по калькулятору
+
+  bool get hasActiveFilters =>
+      categories.isNotEmpty || cultures.isNotEmpty || diseases.isNotEmpty || minPrice != null || maxPrice != null;
+
+  void reset() {
+    categories.clear();
+    cultures.clear();
+    diseases.clear();
+    minPrice = null;
+    maxPrice = null;
+    sortBy = 'name';
+    sortAscending = true;
+    sortByCalculator = false;
+  }
+
+    List<Product> apply(List<Product> input, String query) {
+    var result = input;
+
+    if (query.isNotEmpty) {
+      final q = query.toLowerCase();
+      result = result.where((p) =>
+        p.name.toLowerCase().contains(q) ||
+        (p.composition?.toLowerCase().contains(q) ?? false) ||
+        p.cultures.any((c) => c.toLowerCase().contains(q)) || // <-- Ищем в списке
+        p.diseases.any((d) => d.toLowerCase().contains(q))    // <-- Ищем в списке
+      ).toList();
+    }
+
+    if (categories.isNotEmpty) result = result.where((p) => categories.contains(p.category)).toList();
+    
+    if (cultures.isNotEmpty) {
+      result = result.where((p) {
+        // Больше не нужен split, просто проверяем пересечение множеств
+        return p.cultures.map((e) => e.trim()).toSet().intersection(cultures).isNotEmpty;
+      }).toList();
+    }
+
+    if (diseases.isNotEmpty) {
+      result = result.where((p) {
+        return p.diseases.map((e) => e.trim()).toSet().intersection(diseases).isNotEmpty;
+      }).toList();
+    }
+
+    if (minPrice != null) result = result.where((p) => p.price != null && p.price! >= minPrice!).toList();
+    if (maxPrice != null) result = result.where((p) => p.price != null && p.price! <= maxPrice!).toList();
+
+    result.sort((a, b) {
+      // 1. Сначала сортируем по калькулятору (если включено)
+      if (sortByCalculator) {
+        final inA = CalculatorManager.instance.items.value.any((e) => e.productId == a.id);
+        final inB = CalculatorManager.instance.items.value.any((e) => e.productId == b.id);
+        if (inA && !inB) return -1;
+        if (!inA && inB) return 1;
+      }
+
+      // 2. Затем стандартная сортировка (по имени или цене)
+      int cmp = 0;
+      if (sortBy == 'name') {
+        cmp = a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      } else if (sortBy == 'price') {
+        cmp = (a.price ?? 0.0).compareTo(b.price ?? 0.0);
+      }
+      return sortAscending ? cmp : -cmp;
+    });
+
+    return result;
+  }
+}
 
 class CatalogScreen extends StatefulWidget {
-  const CatalogScreen({super.key});
+  
+  final bool autoSelectMode; // <-- ДОБАВИТЬ
+
+  const CatalogScreen({super.key, this.autoSelectMode = false}); // <-- ОБНОВИТЬ
 
   @override
   State<CatalogScreen> createState() => _CatalogScreenState();
@@ -14,296 +101,1048 @@ class _CatalogScreenState extends State<CatalogScreen> {
   List<Product> _products = [];
   bool _isLoading = true;
   String _searchQuery = '';
-  String? _selectedCategory;
-  List<String> _categories = [];
   final FocusNode _searchFocusNode = FocusNode();
+  final TextEditingController _searchController = TextEditingController();
+  final CatalogFilter _filter = CatalogFilter();
+  
+  List<String> _categories = [];
+  List<String> _availableCultures = [];
+  List<String> _availableDiseases = [];
 
+  bool _isSelectionMode = false;
+  bool _isSelectionConfirmed = false; // <-- НОВАЯ ПЕРЕМЕННАЯ (Фаза 2)
+ 
+  Set<int> _selectedIds = {};
+
+  // Этот метод вызывается, когда в БД что-то изменилось (очистка/импорт)
+  void _onDbUpdate() {
+    _loadData(clearFilters: true);
+  }
+   // Метод, который вызывается, когда пользователь нажал "Подобрать препарат"
+  void _onApplyExternalFilters() {
+    setState(() {
+      // 1. Сбрасываем старые фильтры
+      _filter.reset();
+      _searchController.clear();
+      _searchQuery = '';
+
+      // 2. Применяем новые
+      _filter.cultures = FilterManager.instance.speciesToFilter;
+      _filter.diseases = FilterManager.instance.diseasesToFilter;
+    });
+  }
   @override
   void initState() {
     super.initState();
-    _loadProducts();
+    DatabaseHelper.dbUpdateTrigger.addListener(_onDbUpdate); // <-- Добавляем слушатель
+    FilterManager.instance.applyTrigger.addListener(_onApplyExternalFilters);
+    // Если пришли из заказа с флагом, сразу включаем режим выбора
+    if (widget.autoSelectMode) {
+      _isSelectionMode = true;
+      _isSelectionConfirmed = false;
+    }
+    _loadData();
   }
 
   @override
   void dispose() {
+    DatabaseHelper.dbUpdateTrigger.removeListener(_onDbUpdate); // <-- Удаляем слушатель
+    FilterManager.instance.applyTrigger.removeListener(_onApplyExternalFilters);
     _searchFocusNode.dispose();
+    _searchController.dispose();
     super.dispose();
   }
 
-  Future<void> _loadProducts() async {
+  // Обновляем _loadData, чтобы она умела сбрасывать фильтры
+  Future<void> _loadData({bool clearFilters = false}) async {
     setState(() => _isLoading = true);
     try {
       final products = await DatabaseHelper.instance.getAllProducts();
-      final categories = products.map((p) => p.category).toSet().toList();
+      final dbData = await DatabaseHelper.instance.getUniqueCulturesAndDiseases();
+      
       setState(() {
         _products = products;
-        _categories = categories;
+        _categories = products.map((p) => p.category).toSet().toList()..sort();
+        _availableCultures = dbData['cultures'] ?? [];
+        _availableDiseases = dbData['diseases'] ?? [];
+        
+        if (clearFilters) {
+          // Полный сброс фильтров и поиска
+          _filter.reset();
+          _searchController.clear();
+          _searchQuery = '';
+        } else {
+          // На всякий случай удаляем "мертвые" фильтры, которых больше нет в базе
+          _filter.categories.removeWhere((c) => !_categories.contains(c));
+          _filter.cultures.removeWhere((c) => !_availableCultures.contains(c));
+          _filter.diseases.removeWhere((d) => !_availableDiseases.contains(d));
+        }
+        
         _isLoading = false;
       });
     } catch (e) {
       setState(() => _isLoading = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка загрузки: $e')),
-      );
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка загрузки: $e')));
     }
   }
 
-  List<Product> get _filteredProducts {
-    var filtered = _products;
-    if (_selectedCategory != null && _selectedCategory!.isNotEmpty) {
-      filtered = filtered.where((p) => p.category == _selectedCategory).toList();
+    List<Product> get _filteredProducts {
+    // Если выбор подтвержден (Фаза 2), показываем ТОЛЬКО выбранные
+    if (_isSelectionConfirmed) {
+      return _products.where((p) => _selectedIds.contains(p.id)).toList();
     }
-    if (_searchQuery.isNotEmpty) {
-      filtered = filtered.where((p) =>
-        p.name.toLowerCase().contains(_searchQuery.toLowerCase()) ||
-        (p.composition?.toLowerCase().contains(_searchQuery.toLowerCase()) ?? false)
-      ).toList();
+
+    // Обычный режим или Фаза 1 (активный выбор)
+    var result = _filter.apply(_products, _searchQuery);
+
+    // Если мы в режиме выбора (Фаза 1), поднимаем выбранные элементы наверх
+      if (_isSelectionMode) {
+      result.sort((a, b) {
+        final aSelected = _selectedIds.contains(a.id);
+        final bSelected = _selectedIds.contains(b.id);
+        
+        if (aSelected && !bSelected) return -1;
+        if (!aSelected && bSelected) return 1;
+        
+        // Если оба выбраны или оба не выбраны, сохраняем алфавитный порядок
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
     }
-    return filtered;
+
+    return result;
   }
 
-  void _hideKeyboard() {
-    _searchFocusNode.unfocus();
+  void _hideKeyboard() => _searchFocusNode.unfocus();
+
+  void _toggleSelectionMode() {
+    setState(() {
+      _isSelectionMode = !_isSelectionMode;
+      if (!_isSelectionMode) _selectedIds.clear();
+    });
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Каталог препаратов'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadProducts,
-          ),
-        ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(100),
-          child: Padding(
-            padding: const EdgeInsets.all(8.0),
-            child: Column(
-              children: [
-                // Поиск с управлением фокусом
-                TextField(
-                  focusNode: _searchFocusNode,
-                  decoration: InputDecoration(
-                    hintText: 'Поиск по названию или составу...',
-                    prefixIcon: const Icon(Icons.search),
-                    suffixIcon: _searchQuery.isNotEmpty
-                        ? IconButton(
-                            icon: const Icon(Icons.clear),
-                            onPressed: () {
-                              setState(() => _searchQuery = '');
-                              _hideKeyboard();
-                            },
-                          )
-                        : null,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                  ),
-                  onChanged: (value) {
-                    setState(() {
-                      _searchQuery = value;
-                    });
-                  },
-                  onSubmitted: (_) => _hideKeyboard(),
-                ),
-                const SizedBox(height: 8),
-                // Фильтр по категориям
-                if (_categories.isNotEmpty)
-                  SizedBox(
-                    height: 36,
-                    child: ListView.builder(
-                      scrollDirection: Axis.horizontal,
-                      itemCount: _categories.length + 1,
-                      itemBuilder: (context, index) {
-                        if (index == 0) {
-                          return _buildCategoryChip('Все', null);
-                        }
-                        final category = _categories[index - 1];
-                        return _buildCategoryChip(category, category);
-                      },
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ),
-      ),
-      body: GestureDetector(
-        onTap: _hideKeyboard,
-        child: _isLoading
-            ? const Center(child: CircularProgressIndicator())
-            : _filteredProducts.isEmpty
-                ? const Center(child: Text('Нет препаратов, соответствующих фильтру'))
-                : ListView.builder(
-                    padding: const EdgeInsets.all(8),
-                    itemCount: _filteredProducts.length,
-                    itemBuilder: (context, index) {
-                      final product = _filteredProducts[index];
-                      return _buildProductCard(product);
-                    },
-                  ),
-      ),
-    );
-  }
-
-  Widget _buildCategoryChip(String label, String? value) {
-    final isSelected = _selectedCategory == value;
-    return Padding(
-      padding: const EdgeInsets.only(right: 6),
-      child: FilterChip(
-        label: Text(label),
-        selected: isSelected,
-        onSelected: (selected) {
-          setState(() {
-            _selectedCategory = selected ? value : null;
-          });
-        },
-        backgroundColor: Colors.grey.shade200,
-        selectedColor: Colors.green.shade100,
-        checkmarkColor: Colors.green,
-      ),
-    );
-  }
-
-  Widget _buildProductCard(Product product) {
-    // Извлекаем первое действующее вещество из состава
-    String firstSubstance = '';
-    if (product.composition != null && product.composition!.isNotEmpty) {
-      final parts = product.composition!.split(';');
-      if (parts.isNotEmpty) {
-        firstSubstance = parts.first.trim();
-        // Если слишком длинное — обрезаем
-        if (firstSubstance.length > 30) {
-          firstSubstance = '${firstSubstance.substring(0, 30)}…';
-        }
+  void _toggleSelection(int id) {
+    setState(() {
+      if (_selectedIds.contains(id)) {
+        _selectedIds.remove(id);
+      } else {
+        _selectedIds.add(id);
       }
+    });
+  }
+
+  // ============================================================
+  // ЭКСПОРТ (С ДИАЛОГОВЫМ ОКНОМ)
+  // ============================================================
+    // --- ВЫНЕСЕННЫЙ МЕТОД ЭКСПОРТА ---
+    Future<void> _exportProductsToExcel(List<Product> productsToExport, String title) async {
+    if (productsToExport.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Нет данных для экспорта (список пуст)')));
+      return;
     }
 
-    // Формируем единицы измерения для нормы расхода
-    String consumptionWithUnit = _formatConsumptionRate(
-      product.consumptionRate,
-      product.package,
-    );
+    // Проверяем, есть ли среди выбранных препаратов те, что есть в калькуляторе
+    final calcItems = CalculatorManager.instance.items.value;
+    final hasCalcItems = productsToExport.any((p) => calcItems.any((c) => c.productId == p.id));
 
-    return Card(
-      margin: const EdgeInsets.only(bottom: 10),
-      elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: ExpansionTile(
-        tilePadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        title: Text(
-          product.name,
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+    bool exportCalcData = false;
+    bool expPercent = true;
+    bool expRub = true;
+    bool expFinalPack = true;
+    bool expCalcRate = true;
+    bool expFinalHa = true;
+
+    if (hasCalcItems) {
+      final result = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => StatefulBuilder(
+          builder: (context, setModalState) {
+            return AlertDialog(
+              title: const Text('Экспорт с расчётами'),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('В выбранном списке есть препараты из калькулятора. Хотите добавить колонки с расчётами?'),
+                      const SizedBox(height: 8),
+                      CheckboxListTile(
+                        title: const Text('Выгружать расчёты из калькулятора'),
+                        value: exportCalcData,
+                        onChanged: (v) => setModalState(() => exportCalcData = v!),
+                        contentPadding: EdgeInsets.zero,
+                      ),
+                      if (exportCalcData) ...[
+                        const Divider(),
+                        const Text('Какие колонки добавить?', style: TextStyle(fontWeight: FontWeight.bold)),
+                        const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 8.0),
+                          child: Text(
+                            'Внимание: расчёты появятся только у препаратов, активных в калькуляторе. У остальных ячейки будут пустыми.',
+                            style: TextStyle(color: Colors.orange, fontSize: 12),
+                          ),
+                        ),
+                        CheckboxListTile(
+                          title: const Text('Скидка (%)'),
+                          value: expPercent,
+                          onChanged: (v) => setModalState(() => expPercent = v!),
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                        CheckboxListTile(
+                          title: const Text('Скидка (руб.)'),
+                          value: expRub,
+                          onChanged: (v) => setModalState(() => expRub = v!),
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                        CheckboxListTile(
+                          title: const Text('Норма расхода (из калькулятора)'),
+                          value: expCalcRate,
+                          onChanged: (v) => setModalState(() => expCalcRate = v!),
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                        CheckboxListTile(
+                          title: const Text('Итоговая цена за упаковку'),
+                          value: expFinalPack,
+                          onChanged: (v) => setModalState(() => expFinalPack = v!),
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                        CheckboxListTile(
+                          title: const Text('Итоговая цена за гектар'),
+                          value: expFinalHa,
+                          onChanged: (v) => setModalState(() => expFinalHa = v!),
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+                ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Экспортировать')),
+              ],
+            );
+          }
         ),
-        subtitle: Column(
+      );
+
+      if (result != true) return;
+    }
+
+    // Собираем инфу о фильтрах
+    final activeFilters = <String>[];
+    if (title == 'Отфильтрованные препараты') {
+      if (_filter.categories.isNotEmpty) activeFilters.add('Тип: ${_filter.categories.join(", ")}');
+      if (_filter.cultures.isNotEmpty) activeFilters.add('Культуры: ${_filter.cultures.join(", ")}');
+      if (_filter.diseases.isNotEmpty) activeFilters.add('Болезни: ${_filter.diseases.join(", ")}');
+      if (_filter.minPrice != null || _filter.maxPrice != null) activeFilters.add('Цена: ${_filter.minPrice ?? 0} - ${_filter.maxPrice ?? '∞'}');
+      if (_searchQuery.isNotEmpty) activeFilters.add('Поиск: "$_searchQuery"');
+    }
+    final filterText = activeFilters.isEmpty ? 'Нет' : activeFilters.join('\n');
+
+    // Диалог подтверждения базовый
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Экспорт: $title'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const SizedBox(height: 4),
-            _buildInfoRow('Категория', product.category),
-            // if (firstSubstance.isNotEmpty)
-            //   _buildInfoRow('ДВ', firstSubstance),
-            if (product.price != null)
-              _buildInfoRow('Цена', '${product.price!.toStringAsFixed(2)} ₽', isPrice: true),
+            Text('Количество записей: ${productsToExport.length}', style: const TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 16),
+            if (title == 'Отфильтрованные препараты') ...[
+              const Text('Применённые фильтры:', style: TextStyle(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 4),
+              Text(filterText, style: const TextStyle(color: Colors.grey)),
+            ],
           ],
         ),
-        trailing: const Icon(Icons.keyboard_arrow_down),
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (product.composition != null && product.composition!.isNotEmpty)
-                  _buildDetailRow('Состав', product.composition!),
-                if (product.manufacturer != null && product.manufacturer!.isNotEmpty)
-                  _buildDetailRow('Производитель', product.manufacturer!),
-                if (product.package != null && product.package!.isNotEmpty)
-                  _buildDetailRow('Упаковка', product.package!),
-                if (consumptionWithUnit.isNotEmpty)
-                  _buildDetailRow('Норма расхода', consumptionWithUnit),
-                const SizedBox(height: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: Colors.green.shade50,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.green.shade200),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+          ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Экспортировать')),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    showDialog(context: context, barrierDismissible: false, builder: (ctx) => const AlertDialog(content: Row(children: [CircularProgressIndicator(), SizedBox(width: 20), Text('Генерация Excel...')])));
+
+    try {
+      final excel = Excel.createExcel();
+      final Sheet sheet = excel['Каталог'];
+      if (excel.sheets.containsKey('Sheet1')) excel.delete('Sheet1');
+
+      // Формируем заголовки
+      List<TextCellValue> headers = [
+        TextCellValue('Название'), TextCellValue('Тип'), TextCellValue('Действующие вещества'), 
+        TextCellValue('Описание'), TextCellValue('Норма расхода'), TextCellValue('Фасовка'), 
+        TextCellValue('Цена, руб.'), TextCellValue('Производитель'), TextCellValue('Культуры'), TextCellValue('Болезни'),
+      ];
+      
+      if (exportCalcData) {
+        if (expPercent) headers.add(TextCellValue('Скидка, %'));
+        if (expRub) headers.add(TextCellValue('Скидка, руб.'));
+        if (expCalcRate) headers.add(TextCellValue('Норма (калькулятор)'));
+        if (expFinalPack) headers.add(TextCellValue('Итоговая цена за упак.'));
+        if (expFinalHa) headers.add(TextCellValue('Итоговая цена за га'));
+      }
+      sheet.appendRow(headers);
+
+      for (final p in productsToExport) {
+        List<CellValue?> rowData = [
+          TextCellValue(p.name), TextCellValue(p.category), TextCellValue(p.composition ?? ''), 
+          TextCellValue(p.description ?? ''), TextCellValue(p.consumptionRate ?? ''), TextCellValue(p.package ?? ''), 
+          p.price != null ? DoubleCellValue(p.price!) : TextCellValue(''), TextCellValue(p.manufacturer ?? ''), 
+          TextCellValue(p.cultures.join(', ')), 
+          TextCellValue(p.diseases.join(', ')),
+        ];
+
+        if (exportCalcData) {
+          CalcItem? calcItem;
+          try { calcItem = calcItems.firstWhere((e) => e.productId == p.id); } catch (_) {}
+
+          if (expPercent) rowData.add(TextCellValue(calcItem?.percent != null ? (calcItem!.percent! / 100).toStringAsFixed(4) : ''));
+          if (expRub) rowData.add(calcItem?.rub != null ? DoubleCellValue(calcItem!.rub!) : TextCellValue(''));
+          if (expCalcRate) rowData.add(calcItem != null ? DoubleCellValue(calcItem.rate) : TextCellValue(''));
+          
+          double? finalPack;
+          double? finalHa;
+          if (calcItem != null && calcItem.percent != null) {
+            finalPack = calcItem.basePrice * (1 - calcItem.percent! / 100);
+            finalHa = finalPack * calcItem.rate;
+          }
+          
+          if (expFinalPack) rowData.add(finalPack != null ? DoubleCellValue(finalPack) : TextCellValue(''));
+          if (expFinalHa) rowData.add(finalHa != null ? DoubleCellValue(finalHa) : TextCellValue(''));
+        }
+
+        sheet.appendRow(rowData);
+      }
+
+      final bytes = excel.save();
+      if (bytes == null) throw Exception('Ошибка генерации');
+      final uint8Bytes = Uint8List.fromList(bytes);
+
+      if (mounted) Navigator.of(context, rootNavigator: true).pop();
+
+      final now = DateTime.now();
+      final dateStr = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+      final timeStr = '${now.hour.toString().padLeft(2, '0')}-${now.minute.toString().padLeft(2, '0')}';
+      final defaultFileName = 'catalog_export_$dateStr-$timeStr.xlsx';
+
+      final Uri? outputUri = await FilePicker.saveFile(dialogTitle: 'Сохранить Excel', fileName: defaultFileName, bytes: uint8Bytes, type: FileType.custom, allowedExtensions: ['xlsx']);
+
+      if (outputUri != null && mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Сохранено ${productsToExport.length} записей'), backgroundColor: Colors.green));
+    } catch (e) {
+      if (mounted) Navigator.of(context, rootNavigator: true).pop();
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
+    }
+  }
+
+  // Обертка для вызова из AppBar
+  void _exportFilteredToExcel() {
+    _exportProductsToExcel(_filteredProducts, 'Отфильтрованные препараты');
+  }
+  // ============================================================
+  // ШТОРКА ФИЛЬТРОВ (НОВЫЙ ДИЗАЙН)
+  // ============================================================
+  void _showFilterSheet() {
+    Set<String> tempCategories = Set.from(_filter.categories);
+    Set<String> tempCultures = Set.from(_filter.cultures);
+    Set<String> tempDiseases = Set.from(_filter.diseases);
+    final minCtrl = TextEditingController(text: _filter.minPrice?.toString() ?? '');
+    final maxCtrl = TextEditingController(text: _filter.maxPrice?.toString() ?? '');
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) {
+          return Padding(
+            padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom, left: 16, right: 16, top: 16),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Фильтры', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                      TextButton(
+                        onPressed: () {
+                          setModalState(() {
+                            tempCategories.clear(); tempCultures.clear(); tempDiseases.clear(); minCtrl.clear(); maxCtrl.clear();
+                          });
+                        },
+                        child: const Text('Сбросить', style: TextStyle(color: Colors.red, fontSize: 16)),
+                      )
+                    ],
                   ),
-                  child: Text(
-                    'Цена: ${product.price != null ? '${product.price!.toStringAsFixed(2)} ₽' : 'не указана'}',
-                    style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 16,
-                      color: Colors.green,
+                  const SizedBox(height: 8),
+                  
+                  // Строка "Тип препарата"
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Тип препарата', style: TextStyle(fontSize: 16)),
+                    subtitle: Text(tempCategories.isEmpty ? 'Любой' : tempCategories.join(', '), style: const TextStyle(color: Colors.grey)),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () async {
+                      final res = await _showMultiSelectDialog(context, 'Тип препарата', _categories, tempCategories);
+                      if (res != null) setModalState(() { tempCategories = res; });
+                    },
+                  ),
+                  const Divider(),
+
+                  // Строка "Культуры"
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Культуры', style: TextStyle(fontSize: 16)),
+                    subtitle: Text(tempCultures.isEmpty ? 'Любые' : tempCultures.join(', '), style: const TextStyle(color: Colors.grey)),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () async {
+                      final res = await _showMultiSelectDialog(context, 'Выберите культуры', _availableCultures, tempCultures);
+                      if (res != null) setModalState(() { tempCultures = res; });
+                    },
+                  ),
+                  const Divider(),
+
+                  // Строка "Болезни"
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Болезни', style: TextStyle(fontSize: 16)),
+                    subtitle: Text(tempDiseases.isEmpty ? 'Любые' : tempDiseases.join(', '), style: const TextStyle(color: Colors.grey)),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () async {
+                      final res = await _showMultiSelectDialog(context, 'Выберите болезни', _availableDiseases, tempDiseases);
+                      if (res != null) setModalState(() { tempDiseases = res; });
+                    },
+                  ),
+                  const Divider(),
+                  
+                  const SizedBox(height: 16),
+                  const Text('Цена, ₽', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(child: TextField(controller: minCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'От', border: OutlineInputBorder()))),
+                      const SizedBox(width: 12),
+                      Expanded(child: TextField(controller: maxCtrl, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'До', border: OutlineInputBorder()))),
+                    ],
+                  ),
+                  const SizedBox(height: 24),
+                  SizedBox(
+                    width: double.infinity, height: 50,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade600, foregroundColor: Colors.white),
+                      onPressed: () {
+                        setState(() {
+                          _filter.categories = tempCategories;
+                          _filter.cultures = tempCultures;
+                          _filter.diseases = tempDiseases;
+                          _filter.minPrice = double.tryParse(minCtrl.text);
+                          _filter.maxPrice = double.tryParse(maxCtrl.text);
+                        });
+                        Navigator.pop(ctx);
+                      },
+                      child: const Text('Применить', style: TextStyle(fontSize: 16)),
                     ),
                   ),
+                  const SizedBox(height: 24),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  // Универсальный диалог мультивыбора (используется и для категорий)
+  Future<Set<String>?> _showMultiSelectDialog(BuildContext context, String title, List<String> options, Set<String> initial) async {
+    final selected = Set<String>.from(initial);
+    String search = '';
+    return showDialog<Set<String>>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) => AlertDialog(
+          title: Text(title),
+          content: SizedBox(
+            width: double.maxFinite, height: 400,
+            child: Column(
+              children: [
+                TextField(decoration: const InputDecoration(hintText: 'Поиск...', prefixIcon: Icon(Icons.search)), onChanged: (v) => setModalState(() => search = v.toLowerCase())),
+                Expanded(
+                  child: ListView(
+                    children: options.where((o) => o.toLowerCase().contains(search)).map((o) {
+                      return CheckboxListTile(title: Text(o), value: selected.contains(o), onChanged: (v) => setModalState(() => v! ? selected.add(o) : selected.remove(o)));
+                    }).toList(),
+                  ),
                 ),
-                const SizedBox(height: 8),
               ],
             ),
           ),
-        ],
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, null), child: const Text('Отмена')),
+            ElevatedButton(onPressed: () => Navigator.pop(ctx, selected), child: const Text('Выбрать')),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ============================================================
+  // ШТОРКА СОРТИРОВКИ
+  // ============================================================
+  void _showSortSheet() {
+    String tempSortBy = _filter.sortBy;
+    bool tempAscending = _filter.sortAscending;
+    bool tempSortByCalculator = _filter.sortByCalculator;
+
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setModalState) => Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Сортировка', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 16),
+              
+              // НОВОЕ: Сортировка по калькулятору
+              CheckboxListTile(
+                title: const Text('Сначала из калькулятора', style: TextStyle(fontSize: 16)),
+                value: tempSortByCalculator,
+                onChanged: (v) => setModalState(() => tempSortByCalculator = v!),
+                contentPadding: EdgeInsets.zero,
+              ),
+              const Divider(),
+              
+              const Text('Критерий:', style: TextStyle(color: Colors.grey)),
+              RadioListTile<String>(title: const Text('По названию'), value: 'name', groupValue: tempSortBy, onChanged: (v) => setModalState(() => tempSortBy = v!), contentPadding: EdgeInsets.zero),
+              RadioListTile<String>(title: const Text('По цене'), value: 'price', groupValue: tempSortBy, onChanged: (v) => setModalState(() => tempSortBy = v!), contentPadding: EdgeInsets.zero),
+              
+              const Divider(),
+              SwitchListTile(
+                title: Text(tempAscending ? 'По возрастанию (А-Я, 0-9)' : 'По убыванию (Я-А, 9-0)'),
+                value: tempAscending, 
+                onChanged: (v) => setModalState(() => tempAscending = v),
+                contentPadding: EdgeInsets.zero,
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity, height: 50,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade600, foregroundColor: Colors.white),
+                  onPressed: () {
+                    setState(() {
+                      _filter.sortBy = tempSortBy;
+                      _filter.sortAscending = tempAscending;
+                      _filter.sortByCalculator = tempSortByCalculator;
+                    });
+                    Navigator.pop(ctx);
+                  },
+                  child: const Text('Применить'),
+                ),
+              )
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ============================================================
+  // ОСНОВНОЙ BUILD
+  // ============================================================
+    @override
+  Widget build(BuildContext context) {
+    final filtered = _filteredProducts;
+
+    return Scaffold(
+      appBar: AppBar(
+        leading: _isSelectionMode
+            ? IconButton(
+                icon: const Icon(Icons.close),
+                tooltip: 'Выйти из выбора',
+                onPressed: () {
+                  setState(() {
+                    _isSelectionMode = false;
+                    _isSelectionConfirmed = false;
+                    _selectedIds.clear();
+                  });
+                },
+              )
+            : null,
+        title: _isSelectionMode
+            ? Text('Выбрано: ${_selectedIds.length}')
+            : null,
+        actions: _isSelectionMode
+            ? [
+                // ПЕРЕКЛЮЧАТЕЛЬ (Фаза 1 -> Фаза 2)
+                Row(
+                  children: [
+                    Text(
+                      _isSelectionConfirmed ? 'Подтверждено' : 'Выбор',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: _isSelectionConfirmed ? Colors.green : Colors.grey.shade700,
+                      ),
+                    ),
+                    Switch(
+                      value: _isSelectionConfirmed,
+                      activeColor: Colors.green,
+                      onChanged: (val) {
+                        if (val && _selectedIds.isEmpty) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Сначала выберите хотя бы один препарат')),
+                          );
+                          return; // Не даем включить переключатель
+                        }
+                        setState(() {
+                          _isSelectionConfirmed = val;
+                          // Если снимаем подтверждение, но ничего не выбрано, выходим из режима
+                          if (!val && _selectedIds.isEmpty) {
+                            _isSelectionMode = false;
+                          }
+                        });
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(width: 8),
+              ]
+            : [
+                // Обычные кнопки (доступны только вне режима выбора)
+                IconButton(
+                  icon: const Icon(Icons.filter_list),
+                  tooltip: 'Фильтр',
+                  onPressed: _showFilterSheet,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.sort),
+                  tooltip: 'Сортировка',
+                  onPressed: _showSortSheet,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.download, color: Colors.blue),
+                  tooltip: 'Экспорт',
+                  onPressed: _exportFilteredToExcel,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.checklist, color: Colors.green),
+                  tooltip: 'Мультивыбор',
+                  onPressed: () {
+                    setState(() {
+                      _isSelectionMode = true;
+                      _isSelectionConfirmed = false;
+                    });
+                  },
+                ),
+                IconButton(
+                  icon: const Icon(Icons.refresh),
+                  onPressed: _loadData,
+                ),
+              ],
+        bottom: PreferredSize(
+          preferredSize: Size.fromHeight(_isSelectionConfirmed ? 0 : (_filter.hasActiveFilters ? 150 : 100)),
+          child: _isSelectionConfirmed 
+              ? const SizedBox.shrink() // В Фазе 2 скрываем поиск и фильтры полностью
+              : Padding(
+                  padding: const EdgeInsets.all(8.0),
+                  child: Column(
+                    children: [
+                      TextField(
+                        controller: _searchController,
+                        focusNode: _searchFocusNode,
+                        decoration: InputDecoration(
+                          hintText: 'Поиск...',
+                          prefixIcon: const Icon(Icons.search),
+                          suffixIcon: _searchQuery.isNotEmpty
+                              ? IconButton(
+                                  icon: const Icon(Icons.clear),
+                                  onPressed: () {
+                                    _searchController.clear();
+                                    setState(() => _searchQuery = '');
+                                    _hideKeyboard();
+                                  },
+                                )
+                              : null,
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                          contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                        ),
+                        onChanged: (v) => setState(() => _searchQuery = v),
+                        onSubmitted: (_) => _hideKeyboard(),
+                      ),
+                      const SizedBox(height: 8),
+                      if (_filter.hasActiveFilters)
+                        SizedBox(
+                          height: 36,
+                          child: ListView(
+                            scrollDirection: Axis.horizontal,
+                            children: [
+                              ..._filter.categories.map((e) => _buildActiveFilterChip(e, () => setState(() => _filter.categories.remove(e)))),
+                              ..._filter.cultures.map((e) => _buildActiveFilterChip(e, () => setState(() => _filter.cultures.remove(e)))),
+                              ..._filter.diseases.map((e) => _buildActiveFilterChip(e, () => setState(() => _filter.diseases.remove(e)))),
+                              if (_filter.minPrice != null || _filter.maxPrice != null)
+                                _buildActiveFilterChip('Цена: ${_filter.minPrice ?? 0} - ${_filter.maxPrice ?? '∞'}', () => setState(() { _filter.minPrice = null; _filter.maxPrice = null; })),
+                              Padding(
+                                padding: const EdgeInsets.only(left: 8),
+                                child: ActionChip(label: const Text('Сбросить все', style: TextStyle(color: Colors.red, fontSize: 12)), onPressed: () => setState(() => _filter.reset())),
+                              )
+                            ],
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+        ),
+      ),
+      body: ValueListenableBuilder<List<CalcItem>>(
+        valueListenable: CalculatorManager.instance.items,
+        builder: (context, calcItems, child) {
+          return ValueListenableBuilder<bool>(
+            valueListenable: CalculatorManager.instance.isAreaMode,
+            builder: (context, isAreaMode, child) {
+              return GestureDetector(
+                onTap: _hideKeyboard,
+                child: _isLoading
+                    ? const Center(child: CircularProgressIndicator())
+                    : filtered.isEmpty
+                        ? const Center(child: Text('Нет препаратов, соответствующих фильтру'))
+                        : ListView.builder(
+                            padding: const EdgeInsets.all(8),
+                            itemCount: filtered.length,
+                            itemBuilder: (context, index) {
+                              return _buildProductCard(filtered[index], calcItems, isAreaMode);
+                            },
+                          ),
+              );
+            },
+          );
+        },
+      ),
+      floatingActionButton: _isSelectionConfirmed && _selectedIds.isNotEmpty
+          ? Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                // 1. Кнопка ЭКСПОРТ
+                FloatingActionButton.extended(
+                  heroTag: 'export_fab',
+                  onPressed: () {
+                    final selectedProducts = _products.where((p) => _selectedIds.contains(p.id)).toList();
+                    _exportProductsToExcel(selectedProducts, 'Выбранные препараты');
+                  },
+                  icon: const Icon(Icons.download),
+                  label: Text('Экспорт (${_selectedIds.length})'),
+                  backgroundColor: Colors.blue.shade700,
+                  foregroundColor: Colors.white,
+                ),
+                const SizedBox(height: 12),
+                
+                // 2. Кнопка В КАЛЬКУЛЯТОР
+                FloatingActionButton.extended(
+                  heroTag: 'calc_fab',
+                  onPressed: () {
+                    int added = 0;
+                    for (var id in _selectedIds) {
+                      final p = _products.firstWhere((element) => element.id == id);
+                      if (CalculatorManager.instance.addProduct(p)) added++;
+                    }
+                    // Сбрасываем режим выбора
+                    setState(() {
+                      _isSelectionMode = false;
+                      _isSelectionConfirmed = false;
+                      _selectedIds.clear();
+                    });
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Добавлено в калькулятор: $added')));
+                  },
+                  icon: const Icon(Icons.calculate),
+                  label: Text('В калькулятор (${_selectedIds.length})'),
+                  backgroundColor: Colors.green.shade600,
+                  foregroundColor: Colors.white,
+                ),
+                const SizedBox(height: 12),
+
+                // 3. Кнопка В ЗАКАЗ (НОВАЯ)
+                FloatingActionButton.extended(
+                  heroTag: 'order_fab',
+                  onPressed: () {
+                    final selectedProducts = _products.where((p) => _selectedIds.contains(p.id)).toList();
+                    // Возвращаем список продуктов туда, откуда пришли (в OrderEditScreen)
+                    Navigator.pop(context, selectedProducts);
+                  },
+                  icon: const Icon(Icons.receipt_long),
+                  label: Text('В заказ (${_selectedIds.length})'),
+                  backgroundColor: Colors.orange.shade800,
+                  foregroundColor: Colors.white,
+                ),
+              ],
+            )
+          : (!_isSelectionMode
+              ? FloatingActionButton(
+                  onPressed: () async {
+                    final res = await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => const CatalogScreen(autoSelectMode: true),
+                      ),
+                    );
+                    if (res  == true) _loadData();
+                  },
+                  backgroundColor: const Color.fromARGB(255, 157, 236, 93),
+                  foregroundColor: Colors.white,
+                  child: const Icon(Icons.add),
+                  tooltip: 'Добавить препарат',
+                )
+              : null), // В Фазе 1 (активный выбор) FAB скрыты
+    );
+  }
+
+  Widget _buildActiveFilterChip(String label, VoidCallback onDeleted) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 6),
+      child: InputChip(label: Text(label, style: const TextStyle(fontSize: 12)), onDeleted: onDeleted, deleteIconColor: Colors.red),
+    );
+  }
+
+  Widget _buildProductCard(Product product, List<CalcItem> calcItems, bool isHectareMode) {
+    String consumptionWithUnit = _formatConsumptionRate(product.consumptionRate, product.package);
+
+    CalcItem? calcItem;
+    try {
+      calcItem = calcItems.firstWhere((item) => item.productId == product.id);
+    } catch (_) {}
+
+    // Рассчитываем эффективную цену (за упаковку или за га)
+    double? effectiveBasePrice;
+    double? effectiveFinalPrice;
+    
+    if (calcItem != null && product.price != null) {
+      // getEffectiveBasePrice теперь принимает обычный bool
+      effectiveBasePrice = calcItem.getEffectiveBasePrice(isHectareMode);
+      effectiveFinalPrice = calcItem.finalPrice;
+    }
+
+    return Dismissible(
+      key: Key('product_${product.id}'),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        decoration: BoxDecoration(color: Colors.red.shade400, borderRadius: BorderRadius.circular(12)),
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 20),
+        child: const Icon(Icons.delete_forever, color: Colors.white, size: 32),
+      ),
+      confirmDismiss: (direction) async {
+        return await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Удалить препарат?'),
+            content: Text('Вы уверены, что хотите удалить "${product.name}"?'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+              ElevatedButton(onPressed: () => Navigator.pop(ctx, true), style: ElevatedButton.styleFrom(backgroundColor: Colors.red), child: const Text('Удалить', style: TextStyle(color: Colors.white))),
+            ],
+          ),
+        );
+      },
+      onDismissed: (direction) async {
+        if (product.id != null) {
+          await DatabaseHelper.instance.deleteProduct(product.id!);
+          _loadData(); // <-- Вместо setState(()
+        }
+      },
+      child: Card(
+        margin: const EdgeInsets.only(bottom: 10),
+        elevation: 2,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        child: InkWell(
+          // Клик по карточке переключает выбор ТОЛЬКО в Фазе 1
+          onTap: (_isSelectionMode && !_isSelectionConfirmed) 
+              ? () => _toggleSelection(product.id!) 
+              : null, 
+          child: ExpansionTile(
+            // Блокируем раскрытие карточки, если мы в режиме выбора
+            onExpansionChanged: _isSelectionMode ? (_) {} : null,
+            title: Row(
+              children: [
+                // Чекбокс показываем только в режиме выбора
+                if (_isSelectionMode)
+                  Checkbox(
+                    value: _selectedIds.contains(product.id),
+                    // В Фазе 2 чекбокс неактивен (или скрыт), чтобы нельзя было снять выбор
+                    onChanged: _isSelectionConfirmed 
+                        ? null 
+                        : (_) => _toggleSelection(product.id!),
+                  ),
+                Expanded(
+                  child: Text(
+                    product.name, 
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)
+                  )
+                ),
+                if (calcItem != null)
+                  IconButton(
+                    icon: Icon(
+                      isHectareMode ? Icons.grass : Icons.inventory_2,
+                      color: Colors.green,
+                      size: 20,
+                    ),
+                    onPressed: () {
+                      CalculatorManager.instance.toggleMode(!isHectareMode);
+                    },
+                    tooltip: isHectareMode ? 'Режим: За гектар' : 'Режим: За упаковку',
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                    splashRadius: 20,
+                  ),
+              ],
+            ),
+            subtitle: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const SizedBox(height: 4),
+                _buildInfoRow('Категория', product.category),
+                
+                if (product.price != null)
+                  // Отображение цены с учетом режима калькулятора
+                  effectiveFinalPrice != null
+                      ? Wrap(
+                          spacing: 8,
+                          runSpacing: 4,
+                          crossAxisAlignment: WrapCrossAlignment.center,
+                          children: [
+                            Text('Цена: ${effectiveBasePrice!.toStringAsFixed(2)} ₽${isHectareMode ? "/га" : ""}',
+                              style: const TextStyle(decoration: TextDecoration.lineThrough, color: Colors.grey, fontSize: 13),
+                            ),
+                            Text('${effectiveFinalPrice.toStringAsFixed(2)} ₽${isHectareMode ? "/га" : ""}',
+                              style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green.shade700, fontSize: 14),
+                            ),
+                            Text('(-${calcItem!.percent!.toStringAsFixed(1)}%)',
+                              style: const TextStyle(color: Colors.red, fontSize: 12, fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        )
+                      : _buildInfoRow('Цена', '${product.price!.toStringAsFixed(2)} ₽', isPrice: true),
+              ],
+            ),
+            trailing: _isSelectionMode ? null : const Icon(Icons.keyboard_arrow_down),
+            children: _isSelectionMode ? [] : [
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (product.composition != null && product.composition!.isNotEmpty) _buildDetailRow('Состав', product.composition!),
+                    if (product.manufacturer != null && product.manufacturer!.isNotEmpty) _buildDetailRow('Производитель', product.manufacturer!),
+                    if (product.package != null && product.package!.isNotEmpty) _buildDetailRow('Упаковка', product.package!),
+                    if (consumptionWithUnit.isNotEmpty) _buildDetailRow('Норма расхода', consumptionWithUnit),
+                    if (product.description != null && product.description!.isNotEmpty) _buildDetailRow('Описание', product.description!),
+                    
+                    // ИСПРАВЛЕНИЕ: проверяем на isNotEmpty и склеиваем через join
+                    if (product.cultures.isNotEmpty) 
+                      _buildDetailRow('Культуры', product.cultures.join(', ')),
+                    if (product.diseases.isNotEmpty) 
+                      _buildDetailRow('Болезни', product.diseases.join(', ')),
+                    
+                    if (isHectareMode && calcItem != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8, bottom: 4),
+                        child: Text('Норма расхода в калькуляторе: ${calcItem.rate.toStringAsFixed(2)} на га', style: const TextStyle(color: Colors.grey, fontStyle: FontStyle.italic)),
+                      ),
+
+                    const SizedBox(height: 8),
+                    
+                    // Блок с итоговой ценой внизу
+                    if (effectiveFinalPrice != null)
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(color: Colors.green.shade50, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.green.shade200)),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text('${effectiveBasePrice!.toStringAsFixed(2)} ₽${isHectareMode ? "/га" : ""}', style: const TextStyle(decoration: TextDecoration.lineThrough, color: Colors.grey)),
+                            const SizedBox(width: 8),
+                            Text('${effectiveFinalPrice.toStringAsFixed(2)} ₽${isHectareMode ? "/га" : ""}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.green)),
+                            const SizedBox(width: 8),
+                            Text('(-${calcItem!.percent!.toStringAsFixed(1)}%)', style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
+                          ],
+                        ),
+                      )
+                    else if (product.price != null)
+                      Container(
+                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                         decoration: BoxDecoration(color: Colors.green.shade50, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.green.shade200)),
+                         child: Text('Цена: ${product.price!.toStringAsFixed(2)} ₽', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.green)),
+                      ),
+
+                    const SizedBox(height: 8),
+                    
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      alignment: WrapAlignment.end,
+                      children: [
+                        TextButton.icon(
+                          icon: Icon(calcItem == null ? Icons.calculate : Icons.remove_shopping_cart),
+                          label: Text(calcItem == null ? 'В калькулятор' : 'Убрать'),
+                          style: TextButton.styleFrom(foregroundColor: calcItem == null ? Colors.grey.shade700 : Colors.red.shade700),
+                          onPressed: () {
+                            if (calcItem == null) {
+                              final added = CalculatorManager.instance.addProduct(product);
+                              if (!added) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Достигнут лимит (10) или нет цены.')));
+                            } else {
+                              CalculatorManager.instance.removeItem(product.id!);
+                            }
+                          },
+                        ),
+                        const SizedBox(width: 8),
+                        TextButton.icon(
+                          icon: const Icon(Icons.edit),
+                          label: const Text('Ред.'),
+                          onPressed: () async {
+                            final result = await Navigator.push(context, MaterialPageRoute(builder: (context) => ProductFormScreen(product: product)));
+                            if (result == true) _loadData();
+                          },
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
 
   String _formatConsumptionRate(String? rate, String? package) {
     if (rate == null || rate.isEmpty) return '';
-    
-    // Определяем единицу из упаковки (л, кг, г, мл)
-    String unit = '';
-    if (package != null) {
-      final match = RegExp(r'(\d+)\s*(л|кг|г|мл|L|l|kg|g|ml)').firstMatch(package);
-      if (match != null) {
-        unit = match.group(2)?.toLowerCase() ?? '';
-        // Приводим к стандартному виду
-        if (unit == 'l') unit = 'л';
-        if (unit == 'kg') unit = 'кг';
-        if (unit == 'g') unit = 'г';
-        if (unit == 'ml') unit = 'мл';
-      }
-    }
-    
-    // Если единица не определена, пробуем найти в самой норме
-    if (unit.isEmpty) {
-      final match = RegExp(r'(\d+(?:[.,]\d+)?)\s*(л|кг|г|мл|L|kg|g|ml)').firstMatch(rate);
-      if (match != null) {
-        unit = match.group(2)?.toLowerCase() ?? '';
-        if (unit == 'l') unit = 'л';
-        if (unit == 'kg') unit = 'кг';
-        if (unit == 'g') unit = 'г';
-        if (unit == 'ml') unit = 'мл';
-        return '$rate'; // уже содержит единицу
-      }
-      return rate;
-    }
-    
-    // Если единица есть, добавляем /га
-    return '$rate $unit/га';
+    return rate;
   }
 
   Widget _buildInfoRow(String label, String value, {bool isPrice = false}) {
     return Row(
       children: [
-        Text(
-          '$label: ',
-          style: TextStyle(
-            color: Colors.grey.shade600,
-            fontSize: 13,
-          ),
-        ),
+        Text('$label: ', style: TextStyle(color: Colors.grey.shade600, fontSize: 13)),
         Expanded(
           child: Text(
             value,
-            style: TextStyle(
-              fontWeight: isPrice ? FontWeight.bold : FontWeight.normal,
-              color: isPrice ? Colors.green.shade700 : Colors.black87,
-              fontSize: 13,
-            ),
+            style: TextStyle(fontWeight: isPrice ? FontWeight.bold : FontWeight.normal, color: isPrice ? Colors.green.shade700 : Colors.black87, fontSize: 13),
             overflow: TextOverflow.ellipsis,
           ),
         ),
@@ -317,19 +1156,9 @@ class _CatalogScreenState extends State<CatalogScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            label,
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              color: Colors.grey.shade700,
-              fontSize: 13,
-            ),
-          ),
+          Text(label, style: TextStyle(fontWeight: FontWeight.w600, color: Colors.grey.shade700, fontSize: 13)),
           const SizedBox(height: 2),
-          Text(
-            value,
-            style: const TextStyle(fontSize: 14),
-          ),
+          Text(value, style: const TextStyle(fontSize: 14)),
           const Divider(height: 12),
         ],
       ),

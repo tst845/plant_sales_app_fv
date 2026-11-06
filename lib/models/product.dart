@@ -8,6 +8,9 @@ class Product {
   final String? package;
   final String? consumptionRate;
   final double? price;
+  final String? description;
+  final List<String> cultures;    // Теперь список
+  final List<String> diseases;    // Теперь список
 
   Product({
     this.id,
@@ -18,9 +21,15 @@ class Product {
     this.package,
     this.consumptionRate,
     this.price,
+    this.description,
+    this.cultures = const [],
+    this.diseases = const [],
   });
 
-  factory Product.fromMap(Map<String, dynamic> map) {
+  factory Product.fromMap(Map<String, dynamic> map, {
+    List<String> cultures = const [],
+    List<String> diseases = const [],
+  }) {
     return Product(
       id: map['id'] as int?,
       name: map['name'] as String,
@@ -30,6 +39,9 @@ class Product {
       package: map['package'] as String?,
       consumptionRate: map['consumption_rate'] as String?,
       price: (map['price'] as num?)?.toDouble(),
+      description: map['description'] as String?,
+      cultures: cultures,
+      diseases: diseases,
     );
   }
 
@@ -42,6 +54,7 @@ class Product {
       'package': package,
       'consumption_rate': consumptionRate,
       'price': price,
+      'description': description,
     };
   }
 }

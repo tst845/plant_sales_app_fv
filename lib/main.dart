@@ -1,6 +1,15 @@
 import 'package:flutter/material.dart';
 import 'screens/catalog_screen.dart';
 import 'screens/settings_screen.dart';
+import 'screens/calculator_screen.dart';
+import 'screens/calculator_manager.dart';
+import 'screens/order_manager.dart';
+import 'models/order.dart'; 
+import 'screens/orders_screen.dart';
+
+
+
+final ValueNotifier<int> mainScreenTabNotifier = ValueNotifier<int>(0);
 
 void main() {
   runApp(const MyApp());
@@ -13,6 +22,13 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Plant Sales',
+      builder: (context, child) {
+        return MediaQuery.withClampedTextScaling(
+          minScaleFactor: 1.0,
+          maxScaleFactor: 1.3,
+          child: child!,
+        );
+      },
       theme: ThemeData(
         primarySwatch: Colors.green,
         useMaterial3: true,
@@ -31,94 +47,89 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> {
   int _selectedIndex = 0;
+  late final List<Widget> _widgetOptions;
 
-  // Теперь первый элемент — это DiagnosisScreen()
-  static const List<Widget> _widgetOptions = <Widget>[
-    DiagnosisScreen(),    // экран диагностики с кнопками
-    CatalogScreen(), 
-    SettingsScreen(),
-  ];
+  void _tabListener() {
+    if (mounted) {
+      setState(() {
+        _selectedIndex = mainScreenTabNotifier.value;
+      });
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    mainScreenTabNotifier.addListener(_tabListener);
+    _widgetOptions = <Widget>[
+      const CatalogScreen(),    // Индекс 0
+      const CalculatorScreen(), // Индекс 1
+      const OrdersScreen(),     // Индекс 2
+      const SettingsScreen(),   // Индекс 3
+    ];
+  }
+
+  @override
+  void dispose() {
+    mainScreenTabNotifier.removeListener(_tabListener);
+    super.dispose();
+  }
 
   void _onItemTapped(int index) {
-    setState(() {
-      _selectedIndex = index;
-    });
+    mainScreenTabNotifier.value = index;
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: _widgetOptions.elementAt(_selectedIndex),
+      body: IndexedStack(
+        index: _selectedIndex,
+        children: _widgetOptions,
+      ),
       bottomNavigationBar: BottomNavigationBar(
-        items: const <BottomNavigationBarItem>[
-          BottomNavigationBarItem(
-            icon: Icon(Icons.camera_alt),
-            label: 'Диагностика',
-          ),
-          BottomNavigationBarItem(
+        type: BottomNavigationBarType.fixed,
+        items: <BottomNavigationBarItem>[
+          const BottomNavigationBarItem(
             icon: Icon(Icons.list_alt),
             label: 'Каталог',
           ),
           BottomNavigationBarItem(
+            icon: ValueListenableBuilder<List<CalcItem>>(
+              valueListenable: CalculatorManager.instance.items,
+              builder: (context, items, child) {
+                return Badge(
+                  isLabelVisible: items.isNotEmpty,
+                  label: Text('${items.length}'),
+                  child: const Icon(Icons.calculate),
+                );
+              },
+            ),
+            label: 'Расчет',
+          ),
+          // Вкладка "Заказы" с индикатором
+          BottomNavigationBarItem(
+            icon: ValueListenableBuilder<Order?>(
+              valueListenable: OrderManager.instance.activeOrder,
+              builder: (context, activeOrder, child) {
+                return Badge(
+                  isLabelVisible: activeOrder != null,
+                  smallSize: 10, // Размер точки
+                  backgroundColor: Colors.orange,
+                  child: const Icon(Icons.receipt_long),
+                );
+              },
+            ),
+            label: 'Заказы',
+          ),
+          const BottomNavigationBarItem(
             icon: Icon(Icons.settings),
             label: 'Настройки',
           ),
         ],
         currentIndex: _selectedIndex,
-        selectedItemColor: Colors.green,
+        selectedItemColor: Colors.green.shade600,
+        unselectedItemColor: Colors.grey,
         onTap: _onItemTapped,
-      ),
-    );
-  }
-}
-
-// --- НОВЫЙ ВИДЖЕТ ДЛЯ ЭКРАНА ДИАГНОСТИКИ ---
-class DiagnosisScreen extends StatelessWidget {
-  const DiagnosisScreen({super.key});
-
-  // Обработчики нажатий (пока просто показывают SnackBar)
-  void _showMessage(BuildContext context, String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message)),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Text(
-            'Диагностика растений',
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 40),
-          ElevatedButton.icon(
-            onPressed: () => _showMessage(context, 'Камера открыта (заглушка)'),
-            icon: const Icon(Icons.camera_alt),
-            label: const Text('Сделать фото'),
-            style: ElevatedButton.styleFrom(minimumSize: const Size(200, 50)),
-          ),
-          const SizedBox(height: 20),
-          ElevatedButton.icon(
-            onPressed: () => _showMessage(context, 'Выбор фото из галереи (заглушка)'),
-            icon: const Icon(Icons.photo_library),
-            label: const Text('Выбрать из галереи'),
-            style: ElevatedButton.styleFrom(minimumSize: const Size(200, 50)),
-          ),
-          const SizedBox(height: 20),
-          ElevatedButton.icon(
-            onPressed: () => _showMessage(context, 'Запуск диагностики (заглушка)'),
-            icon: const Icon(Icons.play_arrow),
-            label: const Text('Запустить диагностику'),
-            style: ElevatedButton.styleFrom(
-              minimumSize: const Size(200, 50),
-              backgroundColor: Colors.green,
-              foregroundColor: Colors.white,
-            ),
-          ),
-        ],
       ),
     );
   }

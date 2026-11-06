@@ -2,91 +2,243 @@
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:excel/excel.dart';
+import 'package:flutter/foundation.dart';
 import '../database/database_helper.dart';
 import '../models/product.dart';
+import 'dart:io';
+import 'dart:typed_data';
 
-// --- Вспомогательный класс для статистики импорта (вынесен наружу) ---
-class ImportStats {
-  int totalRows = 0;
-  int accepted = 0;
-  int skipped = 0;
-  List<Map<String, dynamic>> skippedDetails = [];
-  Map<String, int> columnNonEmpty = {};
-}
+// ============================================================
+// Структуры данных
+// ============================================================
 
-// ---- Структуры для данных ----
-class SheetInfo {
-  String sheetName;
-  String format; // 'price' или 'catalog'
-  Map<String, List<int>> foundColumns; // логическое поле -> список индексов
-  List<String> missingRequired; // названия отсутствующих обязательных полей
-  bool hasRequired; // все обязательные поля есть
-  List<String> duplicateFields; // поля, где найдено >1 колонки
-  List<dynamic> rows; // данные (сырые строки) для последующего парсинга
-  SheetInfo({
+class SheetAnalysis {
+  final String sheetName;
+  final String format; // 'price' | 'catalog'
+  final List<String> headerLabels; // заголовки шапки
+  final Map<String, List<int>> foundColumns; // поле -> индексы колонок
+  final List<dynamic> dataRows; // строки ПОСЛЕ шапки
+  String? manualCategory; // значение, введённое пользователем вручную
+  final List<String> missingRequired;
+  final bool hasRequired;
+  final bool hasCategoryColumn;
+  final bool hasCategoryInSeparators;
+
+  SheetAnalysis({
     required this.sheetName,
     required this.format,
+    required this.headerLabels,
     required this.foundColumns,
+    required this.dataRows,
+    this.manualCategory,
     required this.missingRequired,
     required this.hasRequired,
-    required this.duplicateFields,
-    required this.rows,
+    required this.hasCategoryColumn,
+    required this.hasCategoryInSeparators,
   });
+
+  bool get hasDuplicates => foundColumns.values.any((v) => v.length > 1);
+
+  bool get hasAnyCategorySource =>
+      hasCategoryColumn || hasCategoryInSeparators || manualCategory != null;
 }
 
 class SheetStats {
   int totalRows = 0;
   int accepted = 0;
   int skipped = 0;
+  int separatorsFound = 0;
+  int emptyOrNoNumberRows = 0;
   List<Map<String, dynamic>> skippedDetails = [];
   Map<String, int> columnNonEmpty = {};
 }
+
+class SheetRejection {
+  final String sheetName;
+  final String reason;
+  SheetRejection(this.sheetName, this.reason);
+}
+// ============================================================
+
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
-  
-    // ---- Ключевые слова для поиска колонок (по корням) ----
-    final Map<String, List<String>> fieldKeywords = {
-      'name': ['препарат', 'название'],
-      'category': ['тип', 'категория'],
-      'composition': ['состав', 'действующ', 'веществ', 'дв'],
-      'manufacturer': ['производитель'],
-      'package': ['упаковк', 'фасовк'],
-      'rate': ['норм', 'расход'],
-      'price': ['цен', 'стоим', 'руб'],
-    };
 
-    // Словарь типов для прайс-листа
-    final Map<String, String> typeVariants = {
-      'ГЕРБИЦИДЫ': 'Гербициды',
-      'ГЕРБЕЦИДЫ': 'Гербициды',
-      'ИНСЕКТИЦИДЫ': 'Инсектициды',
-      'ФУНГИЦИДЫ': 'Фунгициды',
-      'ДЕСИКАНТЫ': 'Десиканты',
-      'ПРОТРАВИТЕЛИ': 'Протравители',
-      'ФУМИГАНТЫ': 'Фумиганты',
-      'СПЕЦПРЕПАРАТЫ': 'Спецпрепараты',
-      'РОДЕНТИЦИДЫ': 'Родентициды',
-    };
+  // Ключевые слова для поиска колонок по корням слов
+  static const Map<String, List<String>> fieldKeywords = {
+    'name': ['препарат', 'название'],
+    'category': ['тип', 'категория'],
+    'composition': ['состав', 'действующ', 'веществ', 'дв'],
+    'manufacturer': ['производитель'],
+    'package': ['упаковк', 'фасовк'],
+    'rate': ['норм', 'расход'],
+    'price': ['цен', 'стоим', 'руб'],
+    'description': ['описан', 'примен', 'характеристик'],
+    'cultures': ['культур', 'обрабат'],
+    'diseases': ['болезн', 'заболев', 'вредит'],
+    
+  };
 
-  // --- Главный метод импорта ---
-   // ---- Главный метод импорта ----
-  Future<void> _importFromExcel(BuildContext context) async {
-    List<PlatformFile>? files = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['xlsx', 'xls'],
-    );
-    if (files == null || files.isEmpty) {
-      _showMessage(context, 'Файл не выбран');
-      return;
-    }
+  // Канонический вид известных категорий
+  static const Map<String, String> typeVariants = {
+    'ГЕРБИЦИДЫ': 'Гербициды',
+    'ГЕРБЕЦИДЫ': 'Гербициды',
+    'ИНСЕКТИЦИДЫ': 'Инсектициды',
+    'ФУНГИЦИДЫ': 'Фунгициды',
+    'ДЕСИКАНТЫ': 'Десиканты',
+    'ПРОТРАВИТЕЛИ': 'Протравители',
+    'ФУМИГАНТЫ': 'Фумиганты',
+    'СПЕЦПРЕПАРАТЫ': 'Спецпрепараты',
+    'РОДЕНТИЦИДЫ': 'Родентициды',
+    'МИКРОУДОБРЕНИЯ': 'Микроудобрения', 
+    'УДОБРЕНИЯ': 'Удобрения',           
+  };
 
+  // Корни для нечёткого распознавания категории
+  static const List<String> _categoryRoots = [
+    'гербицид',
+    'гербецид',
+    'инсектицид',
+    'фунгицид',
+    'десикант',
+    'протравител',
+    'фумигант',
+    'спецпрепарат',
+    'родентицид',
+  ];
+
+  // ---------- Безопасное чтение ячейки ----------
+  static String _safeCellText(dynamic cell) {
+    if (cell == null) return '';
     try {
-      final file = files.first;
-      final bytes = await file.readAsBytes();
+      final dynamic v = cell.value;
+      if (v == null) return '';
+      return v.toString().trim();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  // ---------- "1.0" -> "1" ----------
+  static String _normalizeNumber(String s) {
+    if (s.endsWith('.0')) return s.substring(0, s.length - 2);
+    return s;
+  }
+
+  // ---------- Распознавание категории в строке ----------
+  static String? _matchCategoryWord(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return null;
+    final upper = trimmed.toUpperCase();
+
+    // 1. Точное совпадение
+    if (typeVariants.containsKey(upper)) return typeVariants[upper];
+
+    // 2. Нечёткое совпадение по корню
+    final lower = trimmed.toLowerCase();
+    for (final root in _categoryRoots) {
+      if (lower.contains(root)) {
+        for (final canonical in typeVariants.values) {
+          if (canonical.toLowerCase().contains(root)) return canonical;
+        }
+      }
+    }
+    return null;
+  }
+
+  // ---------- Определение строки-разделителя ----------
+  // Разделитель = в первой непустой ячейке стоит только слово категории.
+  static String? _detectSeparator(List<dynamic> row) {
+    if (row.isEmpty) return null;
+    String first = '';
+    for (final c in row) {
+      final t = _safeCellText(c);
+      if (t.isNotEmpty) {
+        first = t;
+        break;
+      }
+    }
+    if (first.isEmpty) return null;
+    return _matchCategoryWord(first);
+  }
+
+    // ---------- Утилита для проверки текстовых цен ----------
+  static bool _isTextPrice(String s) {
+    final lower = s.toLowerCase();
+    const textMarkers = [
+      'по запросу', 'уточняйте', 'нет', 'звоните', 
+      'договорная', 'под заказ', 'запрашивайте'
+    ];
+    for (final m in textMarkers) {
+      if (lower.contains(m)) return true;
+    }
+    // Если в строке нет ни одной цифры, это тоже просто текст (например, "бесплатно")
+    return !RegExp(r'\d').hasMatch(s);
+  }
+  // ---------- Утилита для парсинга чисел (исключает даты) ----------
+  static double? _parseNumericValue(String raw) {
+    if (raw.isEmpty) return null;
+    
+    // Убираем все пробелы и меняем запятую на точку
+    final cleaned = raw.replaceAll(RegExp(r'\s+'), '').replaceAll(',', '.');
+    
+    // Регулярка пропускает только целые или десятичные числа (например, 100, 1.5, -2.5).
+    // Даты (содержащие дефисы или слэши) и прочий текст сюда не пройдут.
+    if (RegExp(r'^-?\d+(\.\d+)?$').hasMatch(cleaned)) {
+      return double.tryParse(cleaned);
+    }
+    return null;
+  }
+  // ---------- UI: Виджет диалога прогресса ----------
+  Widget _buildProgressDialog(
+      BuildContext context, ValueNotifier<String> progressNotifier, VoidCallback onCancel) {
+    return AlertDialog(
+      title: const Text('Импорт данных'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const SizedBox(height: 10),
+          const CircularProgressIndicator(),
+          const SizedBox(height: 20),
+          ValueListenableBuilder<String>(
+            valueListenable: progressNotifier,
+            builder: (context, value, child) {
+              return Text(
+                value,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 13),
+              );
+            },
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: onCancel,
+          child: const Text('Отмена', style: TextStyle(color: Colors.red)),
+        ),
+      ],
+    );
+  }
+
+  // ============================================================
+  // ГЛАВНЫЙ МЕТОД ИМПОРТА
+  // ============================================================
+  Future<void> _importFromExcel(BuildContext context) async {
+    try {
+      final result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['xlsx', 'xls'],
+      );
+      if (result == null || result.isEmpty) {
+        _showMessage(context, 'Файл не выбран');
+        return;
+      }
+
+      final bytes = await result.first.readAsBytes();
       final excel = Excel.decodeBytes(bytes);
 
-      List<String> sheetNames = excel.tables.keys
-          .where((name) => !name.startsWith('_'))
+      final sheetNames = excel.tables.keys
+          .where((n) => !n.startsWith('_'))
           .toList();
 
       if (sheetNames.isEmpty) {
@@ -94,1116 +246,1314 @@ class SettingsScreen extends StatelessWidget {
         return;
       }
 
-      // Диалог выбора листов
-      final selectedSheets = await _showSheetSelectionDialog(context, sheetNames);
-      if (selectedSheets == null) return;
+      final selected = await _showSheetSelectionDialog(context, sheetNames);
+      if (selected == null || selected.isEmpty) return;
 
-      // Этап 1: сбор информации по каждому листу
-      List<SheetInfo> allInfo = [];
-      for (var sheetName in selectedSheets) {
-        final sheet = excel.tables[sheetName];
-        if (sheet == null) continue;
-        final info = await _analyzeSheet(sheet, sheetName);
-        if (info != null) allInfo.add(info);
+      // ---------- Анализ листов ----------
+      final analyses = <SheetAnalysis>[];
+      final rejectedAtAnalysis = <SheetRejection>[];
+      for (final name in selected) {
+        final sheet = excel.tables[name];
+        if (sheet == null) {
+          rejectedAtAnalysis
+              .add(SheetRejection(name, 'лист отсутствует в файле'));
+          continue;
+        }
+        final a = _analyzeSheet(sheet, name, rejectedAtAnalysis);
+        if (a != null) analyses.add(a);
       }
 
-      if (allInfo.isEmpty) {
-        _showMessage(context, 'Не удалось распознать формат данных на выбранных листах');
+      if (analyses.isEmpty) {
+        final buf = StringBuffer();
+        buf.writeln('Не удалось распознать ни один из выбранных листов.\n');
+        if (rejectedAtAnalysis.isNotEmpty) {
+          buf.writeln('Причины:');
+          for (final r in rejectedAtAnalysis) {
+            buf.writeln('  • "${r.sheetName}" — ${r.reason}');
+          }
+        }
+        _showMessage(context, buf.toString());
         return;
       }
 
-      // Этап 2: анализ обязательных полей и частичная обработка
-      List<SheetInfo> validSheets = [];
-      List<SheetInfo> invalidSheets = [];
-      for (var info in allInfo) {
-        if (info.hasRequired) validSheets.add(info);
-        else invalidSheets.add(info);
+      // ---------- Отчёт-анализ ----------
+      // ---------- Разделяем на валидные и невалидные ----------
+      final validAnalyses = analyses.where((a) => a.hasRequired).toList();
+      final invalidAnalyses = analyses.where((a) => !a.hasRequired).toList();
+
+      /// Список листов, которые НЕ будут импортированы:
+      // сюда попадут невалидные + те, что пользователь отбросил сам
+      final List<SheetAnalysis> rejectedSheets = [];
+      final List<SheetRejection> rejectedReasons = [];
+      for (final r in rejectedAtAnalysis) {
+        rejectedReasons.add(r);
       }
 
-      if (invalidSheets.isNotEmpty && validSheets.isEmpty) {
-        // Все листы имеют пропуски — прерываем
-        String msg = 'На всех выбранных листах отсутствуют обязательные поля:\n';
-        for (var info in invalidSheets) {
-          msg += '  ${info.sheetName}: пропущены ${info.missingRequired.join(', ')}\n';
+      // Случай 1: все листы невалидны — прерываем импорт
+      if (validAnalyses.isEmpty) {
+        final buf = StringBuffer();
+        buf.writeln('Ни один лист не может быть импортирован.\n');
+        buf.writeln('Листы с пропущенными обязательными полями:');
+        for (final a in invalidAnalyses) {
+          buf.writeln(
+              '  • "${a.sheetName}": ${a.missingRequired.join(', ')}');
         }
-        _showMessage(context, msg);
+        _showMessage(context, buf.toString());
         return;
       }
 
-      if (invalidSheets.isNotEmpty && validSheets.isNotEmpty) {
-        // Частичная пригодность — спрашиваем пользователя
-        final proceed = await _showPartialImportDialog(context, invalidSheets, validSheets);
-        if (proceed == null || !proceed) return;
-        // Продолжаем только с validSheets
-        allInfo = validSheets;
-      } else {
-        // Все листы пригодны
-        allInfo = validSheets;
-      }
-
-      // Этап 3: обработка дублирующихся колонок для каждого листа
-      // Собираем листы с дублями
-      Map<String, Map<String, List<int>>> sheetDuplicates = {};
-      for (var info in allInfo) {
-        Map<String, List<int>> dupFields = {};
-        info.foundColumns.forEach((field, indices) {
-          if (indices.length > 1) {
-            dupFields[field] = indices;
-          }
-        });
-        if (dupFields.isNotEmpty) {
-          sheetDuplicates[info.sheetName] = dupFields;
-        }
-      }
-
-      // Если есть дубли, показываем диалоги выбора (по одному на лист)
-      if (sheetDuplicates.isNotEmpty) {
-        // Запрашиваем выбор для каждого листа, где есть дубли
-        for (var info in allInfo) {
-          if (sheetDuplicates.containsKey(info.sheetName)) {
-            final selected = await _showColumnSelectionDialog(
-              context,
-              info.sheetName,
-              sheetDuplicates[info.sheetName]!,
-              info.rows, // передаём первые строки для отображения примеров (можно и без них)
-            );
-            if (selected == null) {
-              // пользователь отменил — прерываем импорт
-              _showMessage(context, 'Импорт отменён пользователем');
-              return;
-            }
-            // Обновляем foundColumns для этого листа — заменяем списки на выбранный индекс
-            for (var entry in selected.entries) {
-              info.foundColumns[entry.key] = [entry.value];
-            }
-          }
-        }
-      }
-
-      // Этап 4: парсинг данных с выбранными колонками
-      List<Product> allProducts = [];
-      Map<String, SheetStats> allStats = {};
-      for (var info in allInfo) {
-        final stats = SheetStats();
-        final products = _parseSheetWithSelectedColumns(
-          info.sheetName,
-          info.format,
-          info.foundColumns,
-          info.rows,
-          stats,
+      // Случай 2: есть и валидные, и невалидные — спрашиваем пользователя
+      if (invalidAnalyses.isNotEmpty) {
+        final proceed = await _showPartialImportDialog(
+          context,
+          invalidAnalyses,
+          validAnalyses,
         );
-        allProducts.addAll(products);
-        allStats[info.sheetName] = stats;
+        if (proceed != true) {
+          _showMessage(context, 'Импорт отменён пользователем');
+          return;
+        }
+        // Пользователь выбрал «Продолжить с пригодными» — запоминаем отброшенные
+        rejectedSheets.addAll(invalidAnalyses);
+        for (final a in invalidAnalyses) {
+          rejectedReasons.add(SheetRejection(
+            a.sheetName,
+            a.missingRequired.isNotEmpty
+                ? 'пропущены: ${a.missingRequired.join(', ')}'
+                : 'непригодны к импорту',
+          ));
+        }
       }
 
-      if (allProducts.isEmpty) {
+      // ---------- Дубли колонок ----------
+      for (final a in validAnalyses) {
+        if (a.hasDuplicates) {
+          final chosen = await _showColumnSelectionDialog(context, a);
+          if (chosen == null) {
+            _showMessage(context, 'Импорт отменён пользователем');
+            return;
+          }
+          for (final e in chosen.entries) {
+            a.foundColumns[e.key] = [e.value];
+          }
+        }
+      }
+
+      // ---------- Ручной ввод категории, если её нигде нет ----------
+      for (final a in validAnalyses) {
+        if (!a.hasAnyCategorySource) {
+          final cat = await _showManualCategoryDialog(context, a.sheetName);
+          if (cat == null) {
+            _showMessage(context,
+                'Импорт отменён: не введена категория для "${a.sheetName}"');
+            return;
+          }
+          a.manualCategory = cat;
+        }
+      }
+
+            // ---------- Парсинг ----------
+      final allProducts = <Product>[];
+      final allStats = <String, SheetStats>{};
+
+      // Считаем общее количество строк
+      final totalRowsToParse = validAnalyses.fold<int>(0, (sum, a) => sum + a.dataRows.length);
+      final showProgress = totalRowsToParse > 150;
+
+      final progressNotifier = ValueNotifier<String>('Подготовка к парсингу...');
+      bool isCancelled = false; // Флаг отмены
+      bool isProgressDialogOpen = false;
+
+      if (showProgress) {
+        isProgressDialogOpen = true;
+        showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (ctx) => _buildProgressDialog(ctx, progressNotifier, () {
+            // Коллбэк нажатия на «Отмена»
+            isCancelled = true;
+            Navigator.of(ctx).pop();
+          }),
+        );
+      }
+
+      try {
+        for (final a in validAnalyses) {
+          if (isCancelled) break; // Если нажали отмену, выходим
+
+          final stats = SheetStats();
+          final products = await _parseSheet(
+            a,
+            stats,
+            progress: showProgress ? progressNotifier : null,
+            isCancelled: () => isCancelled,
+          );
+          
+          if (isCancelled) break; // Проверяем после завершения листа
+
+          allProducts.addAll(products);
+          allStats[a.sheetName] = stats;
+        }
+      } finally {
+        if (isProgressDialogOpen) {
+          Navigator.of(context, rootNavigator: true).pop();
+        }
+      }
+
+      if (isCancelled) {
+        _showMessage(context, 'Импорт отменён пользователем');
+        return;
+      }
+
+            // ---------- Проверка дубликатов в БД ----------
+      final existingNames =
+          await DatabaseHelper.instance.getExistingProductNames();
+
+      final duplicates = <Product>[];
+      final uniqueProducts = <Product>[];
+      for (final p in allProducts) {
+        final key = p.name.trim().toLowerCase();
+        if (existingNames.contains(key)) {
+          duplicates.add(p);
+        } else {
+          uniqueProducts.add(p);
+        }
+      }
+
+      // Переменные для итогового отчета
+      int addedCount = 0;
+      int updatedCount = 0;
+      int skippedDuplicatesCount = 0;
+      int totalParsed = allProducts.length;
+
+      if (duplicates.isNotEmpty) {
+        final action = await _showDuplicatesDialog(
+          context,
+          duplicates,
+          uniqueProducts.length,
+        );
+
+        if (action == null || action == 'cancel') {
+          _showMessage(context, 'Импорт отменён пользователем');
+          return;
+        }
+
+        if (action == 'skip') {
+          skippedDuplicatesCount = duplicates.length;
+          allProducts
+            ..clear()
+            ..addAll(uniqueProducts);
+        } else if (action == 'update_only') {
+          updatedCount = duplicates.length;
+          allProducts.clear(); // Ничего не добавляем, только обновляем
+        } else if (action == 'update_and_add') {
+          updatedCount = duplicates.length;
+          allProducts
+            ..clear()
+            ..addAll(uniqueProducts);
+        }
+
+        if (allProducts.isEmpty && action == 'skip') {
+          _showMessage(
+            context,
+            'Все записи уже есть в базе данных — нечего импортировать',
+          );
+          return;
+        }
+      }
+
+      // ---------- Итоговый отчёт и вставка ----------
+      if (allProducts.isEmpty && updatedCount == 0) {
+        await _showImportReportDialog(
+          context,
+          allStats,
+          totalParsed: 0,
+          addedCount: 0,
+          updatedCount: 0,
+          skippedDuplicatesCount: 0,
+          dryRun: true,
+          rejectedSheets: rejectedSheets,
+          rejectedReasons: rejectedReasons,
+        );
         _showMessage(context, 'Не найдено корректных записей для импорта');
         return;
       }
 
-      // Этап 5: отчёт и подтверждение
-      final confirmed = await _showImportReportDialog(context, allStats, allProducts.length);
+      final confirmed = await _showImportReportDialog(
+        context,
+        allStats,
+        totalParsed: totalParsed,
+        addedCount: allProducts.length,
+        updatedCount: updatedCount,
+        skippedDuplicatesCount: skippedDuplicatesCount,
+        rejectedSheets: rejectedSheets,
+        rejectedReasons: rejectedReasons,
+      );
+
       if (confirmed == true) {
-        await DatabaseHelper.instance.insertProducts(allProducts);
-        _showMessage(context, 'Импортировано ${allProducts.length} записей', isSuccess: true);
+        // ВАЖНО: Делаем изменения в БД только после финального подтверждения!
+        if (updatedCount > 0) {
+          await DatabaseHelper.instance.updateProducts(duplicates);
+        }
+        if (allProducts.isNotEmpty) {
+          await DatabaseHelper.instance.insertProducts(allProducts);
+          addedCount = allProducts.length;
+        }
+        DatabaseHelper.dbUpdateTrigger.value++; // <-- ТРИГГЕР (Импорт)
+        String msg = 'Импорт завершён. ';
+        if (addedCount > 0) msg += 'Добавлено: $addedCount. ';
+        if (updatedCount > 0) msg += 'Обновлено: $updatedCount. ';
+        if (skippedDuplicatesCount > 0) msg += 'Пропущено дублей: $skippedDuplicatesCount.';
+        
+        _showMessage(context, msg.trim(), isSuccess: true);
       } else {
         _showMessage(context, 'Импорт отменён');
       }
-    } catch (e) {
+    } catch (e, st) {
+      
+      debugPrint('=== Import error ===');
+      debugPrint('Type: ${e.runtimeType}');
+      debugPrint('Message: $e');
+      debugPrint('Stack:\n$st');
       _showMessage(context, 'Ошибка импорта: $e');
     }
   }
 
-  // ---- Анализ одного листа ----
-  Future<SheetInfo?> _analyzeSheet(Sheet sheet, String sheetName) async {
-    // Определяем формат
-    final format = _detectFormat(sheet);
-    if (format == null) return null;
+  // ============================================================
+  // АНАЛИЗ ОДНОГО ЛИСТА
+  // ============================================================
+  SheetAnalysis? _analyzeSheet(
+    Sheet sheet,
+    String sheetName,
+    List<SheetRejection> rejections,
+  ) {
+    debugPrint('--- Analyze sheet "$sheetName" ---');
+    debugPrint('  total sheet.rows = ${sheet.rows.length}');
 
-    // Ищем строку с заголовками
-    int headerRowIndex = -1;
-    for (int i = 0; i < sheet.rows.length && i < 20; i++) {
+    final format = _detectFormat(sheet);
+    debugPrint('  format = $format');
+    if (format == null) {
+      rejections.add(SheetRejection(
+        sheetName,
+        'не распознан формат (нет ни шапки «№ п/п + Препараты», '
+        'ни колонки «Тип»)',
+      ));
+      return null;
+    }
+
+    // ---------- Поиск строки шапки ----------
+    int headerIdx = -1;
+    for (int i = 0; i < sheet.rows.length && i < 50; i++) {
       final row = sheet.rows[i];
       if (row.isEmpty) continue;
-      final first = row[0]?.value?.toString().trim() ?? '';
-      if (first == '№ п/п') {
-        for (var cell in row) {
-          if (cell?.value?.toString().trim() == 'Препараты') {
-            headerRowIndex = i;
+
+      if (format == 'price') {
+        // Ищем строку, где есть колонка с названием препарата
+        bool hasNameCol = false;
+        for (final c in row) {
+          final val = _safeCellText(c).toLowerCase();
+          if (val.contains('препарат') || val.contains('название') || val.contains('наименование')) {
+            hasNameCol = true;
             break;
           }
         }
-        if (headerRowIndex != -1) break;
+        if (hasNameCol) {
+          headerIdx = i;
+          break;
+        }
       } else {
-        // Проверка на наличие "Название" (для каталога)
-        for (var cell in row) {
-          if (cell?.value?.toString().trim().toLowerCase() == 'название') {
-            headerRowIndex = i;
-            break;
-          }
+        // catalog
+        final first = _safeCellText(row[0]);
+        if (first.toLowerCase() == 'название') {
+          headerIdx = i;
+          break;
         }
-        if (headerRowIndex != -1) break;
       }
     }
 
-    if (headerRowIndex == -1) return null;
 
-    final headerRow = sheet.rows[headerRowIndex];
-    final rows = sheet.rows.sublist(headerRowIndex + 1); // данные после заголовка
+    debugPrint('  headerIdx = $headerIdx');
+    if (headerIdx == -1) {
+      rejections.add(SheetRejection(
+        sheetName,
+        format == 'price'
+            ? 'не найдена строка заголовка «№ п/п … Препараты»'
+            : 'не найдена строка заголовка с «Название» в первой колонке',
+      ));
+      return null;
+    }
 
-    // Поиск колонок по ключевым словам
-    Map<String, List<int>> foundColumns = {};
-    // Для каждого логического поля ищем все подходящие колонки
-    for (var entry in fieldKeywords.entries) {
+    // ---------- Шапка ----------
+    final headerRow = sheet.rows[headerIdx];
+    final headerLabels = headerRow.map((c) => _safeCellText(c)).toList();
+    debugPrint('  headerLabels = $headerLabels');
+
+    // ---------- Данные после шапки (объявляем ЗДЕСЬ!) ----------
+    final List<dynamic> dataRows = sheet.rows.sublist(headerIdx + 1);
+
+    // ---------- Поиск колонок по ключевым словам ----------
+    final foundColumns = <String, List<int>>{};
+    for (final entry in fieldKeywords.entries) {
       final field = entry.key;
       final keywords = entry.value;
-      List<int> indices = [];
+      final indices = <int>[];
       for (int i = 0; i < headerRow.length; i++) {
-        final cellValue = headerRow[i]?.value?.toString().trim() ?? '';
-        if (cellValue.isEmpty) continue;
-        final lower = cellValue.toLowerCase();
-        // Проверяем, содержит ли заголовок хотя бы одно ключевое слово
-        for (var kw in keywords) {
-          if (lower.contains(kw.toLowerCase())) {
+        final val = _safeCellText(headerRow[i]);
+        if (val.isEmpty) continue;
+        final lower = val.toLowerCase();
+        for (final kw in keywords) {
+          if (lower.contains(kw)) {
             indices.add(i);
             break;
           }
         }
       }
-      if (indices.isNotEmpty) {
-        foundColumns[field] = indices;
-      }
+      if (indices.isNotEmpty) foundColumns[field] = indices;
     }
+    debugPrint('  foundColumns = $foundColumns');
 
-    // Определяем наличие обязательных полей: название (name) и категория (category)
-    bool hasName = foundColumns.containsKey('name') && foundColumns['name']!.isNotEmpty;
-    bool hasCategory = foundColumns.containsKey('category') && foundColumns['category']!.isNotEmpty;
+    // ---------- Категория ----------
+    final hasName = foundColumns['name']?.isNotEmpty == true;
+    final hasCategoryColumn = foundColumns['category']?.isNotEmpty == true;
 
-    // Для прайс-листа категория может быть определена из разделителей или имени листа
-    String? manualCategory;
-    if (format == 'price' && !hasCategory) {
-      // Ищем категорию в строках выше заголовка (разделители)
-      String? categoryFromHeader = _findCategoryInRows(sheet, headerRowIndex, typeVariants);
-      if (categoryFromHeader != null) {
-        // категория найдена — добавляем как найденную колонку? Нет, это не колонка.
-        // Мы сохраним её в переменную для использования при парсинге.
-        manualCategory = categoryFromHeader;
-        hasCategory = true; // считаем, что категория есть
-      } else {
-        // Проверяем имя листа
-        final upperName = sheetName.trim().toUpperCase();
-        if (typeVariants.containsKey(upperName)) {
-          manualCategory = typeVariants[upperName]!;
-          hasCategory = true;
-        } else if (!upperName.contains('TABLE') && !upperName.contains('ПРАЙС')) {
-          manualCategory = sheetName.trim();
-          hasCategory = true;
+    bool hasCategoryInSeparators = false;
+    if (format == 'price' && !hasCategoryColumn) {
+      for (final r in dataRows) {
+        if (r.isEmpty) continue;
+        if (_detectSeparator(r) != null) {
+          hasCategoryInSeparators = true;
+          break;
         }
       }
     }
 
-    // Если всё ещё нет категории, но это прайс-лист, возможно пользователь выберет вручную позже.
-    // Пока отмечаем как отсутствующую.
-    List<String> missingRequired = [];
+    // ---------- Обязательные поля ----------
+    final missingRequired = <String>[];
     if (!hasName) missingRequired.add('Название');
-    if (!hasCategory) missingRequired.add('Категория');
 
-    // Если есть пропуски, проверяем, можно ли их исправить вручную (только категория)
-    bool hasOtherMissing = missingRequired.contains('Название'); // название обязательно, его нельзя исправить вручную
+    final hasCategorySource =
+        hasCategoryColumn || hasCategoryInSeparators;
+    if (!hasCategorySource) missingRequired.add('Категория');
 
-    // Для категории: если отсутствует только категория, мы можем предложить выбрать её позже
-    // Но мы будем предлагать только если нет других пропусков
-    bool canManualCategory = !hasName && missingRequired.length == 1 && missingRequired.contains('Категория');
+    // Лист пригоден, если есть колонка «name». Если у категории нет
+    // ни колонки, ни разделителей — спросим пользователя вручную.
+    final hasRequired = hasName;
 
-    // Итоговая пригодность: наличие названия и (категория найдена или может быть назначена вручную)
-    bool hasRequired = hasName && (hasCategory || canManualCategory);
+    debugPrint('  hasName=$hasName, hasCategoryColumn=$hasCategoryColumn, '
+        'sep=$hasCategoryInSeparators');
 
-    // Находим дублирующиеся поля
-    List<String> duplicateFields = [];
-    foundColumns.forEach((field, indices) {
-      if (indices.length > 1) duplicateFields.add(field);
-    });
-
-    return SheetInfo(
+    return SheetAnalysis(
       sheetName: sheetName,
       format: format,
+      headerLabels: headerLabels,
       foundColumns: foundColumns,
+      dataRows: dataRows,
+      manualCategory: null, // заполняется позже, если пользователь введёт
       missingRequired: missingRequired,
       hasRequired: hasRequired,
-      duplicateFields: duplicateFields,
-      rows: rows,
+      hasCategoryColumn: hasCategoryColumn,
+      hasCategoryInSeparators: hasCategoryInSeparators,
     );
   }
 
-  // ---- Поиск категории в строках выше заголовка ----
-  String? _findCategoryInRows(Sheet sheet, int headerRowIndex, Map<String, String> variants) {
-    for (int i = headerRowIndex - 1; i >= 0; i--) {
+  // ============================================================
+  // ОПРЕДЕЛЕНИЕ ФОРМАТА
+  // ============================================================
+  String? _detectFormat(Sheet sheet) {
+    // 1. Сначала проверяем Каталог (есть колонка "Тип")
+    for (int i = 0; i < sheet.rows.length && i < 20; i++) {
       final row = sheet.rows[i];
       if (row.isEmpty) continue;
-      final first = row[0]?.value?.toString().trim().toUpperCase() ?? '';
-      if (variants.containsKey(first)) {
-        return variants[first];
+      for (final c in row) {
+        if (_safeCellText(c).toLowerCase() == 'тип') return 'catalog';
+      }
+    }
+    
+    // 2. Затем проверяем Прайс (есть колонка с названием)
+    for (int i = 0; i < sheet.rows.length && i < 30; i++) {
+      final row = sheet.rows[i];
+      if (row.isEmpty) continue;
+      for (final c in row) {
+        final t = _safeCellText(c).toLowerCase();
+        if (t.contains('препарат') || t.contains('название') || t.contains('наименование')) {
+          return 'price';
+        }
       }
     }
     return null;
   }
 
-  // ---- Определение формата листа ----
-  String? _detectFormat(Sheet sheet) {
-    for (int i = 0; i < sheet.rows.length && i < 15; i++) {
-      final row = sheet.rows[i];
+  // ============================================================
+  // ПАРСИНГ ОДНОГО ЛИСТА
+  // ============================================================
+  Future<List<Product>> _parseSheet(
+    SheetAnalysis a,
+    SheetStats stats, {
+    ValueNotifier<String>? progress,
+    bool Function()? isCancelled, // Добавили функцию проверки
+  }) async {
+    debugPrint('--- Parse sheet "${a.sheetName}" ---');
+    
+    if (a.foundColumns['name']?.isEmpty ?? true) {
+      return [];
+    }
+
+    int idx(Map<String, List<int>> m, String key) =>
+        (m[key]?.isNotEmpty == true) ? m[key]!.first : -1;
+
+    final nameIdx = idx(a.foundColumns, 'name');
+    final categoryIdx = idx(a.foundColumns, 'category');
+    final compositionIdx = idx(a.foundColumns, 'composition');
+    final manufacturerIdx = idx(a.foundColumns, 'manufacturer');
+    final packageIdx = idx(a.foundColumns, 'package');
+    final rateIdx = idx(a.foundColumns, 'rate');
+    final priceIdx = idx(a.foundColumns, 'price');
+    final descriptionIdx = idx(a.foundColumns, 'description');
+    final culturesIdx = idx(a.foundColumns, 'cultures');
+    final diseasesIdx = idx(a.foundColumns, 'diseases');
+
+    stats.columnNonEmpty = {
+      'Название': 0,
+      'Категория': 0,
+      'Состав': 0,
+      'Производитель': 0,
+      'Упаковка': 0,
+      'Норма расхода': 0,
+      'Цена': 0,
+    };
+
+    final products = <Product>[];
+    String currentCategory = a.manualCategory ?? '';
+
+    for (int i = 0; i < a.dataRows.length; i++) {
+      // Проверка на отмену каждые 20 строк
+      if (i > 0 && i % 20 == 0) {
+        if (isCancelled != null && isCancelled()) return []; // Экстренный выход
+        
+        if (progress != null) {
+          progress.value = 'Обработка листа "${a.sheetName}":\n$i из ${a.dataRows.length} строк';
+        }
+        await Future.delayed(Duration.zero);
+      }
+      
+
+      final row = a.dataRows[i];
       if (row.isEmpty) continue;
-      final first = row[0]?.value?.toString().trim() ?? '';
-      if (first == '№ п/п') {
-        for (var cell in row) {
-          if (cell?.value?.toString().trim() == 'Препараты') {
-            return 'price';
+
+      String getCell(int i2) {
+        if (i2 < 0 || i2 >= row.length) return '';
+        return _safeCellText(row[i2]);
+      }
+
+      // ---------- Для прайса: разделитель и номер ----------
+      if (a.format == 'price') {
+        // 1. Проверяем строку на разделитель (например, "ГЕРБИЦИДЫ", "ИНСЕКТИЦИДЫ")
+        final sep = _detectSeparator(row);
+        if (sep != null) {
+          currentCategory = sep;
+          stats.separatorsFound++;
+          continue; // Пропускаем саму строку разделителя
+        }
+        
+        // Проверяем только, есть ли в строке хоть какие-то данные.
+        // Это защитит от пустых строк в конце файла или между препаратами.
+        bool isRowEmpty = true;
+        for (final c in row) {
+          if (_safeCellText(c).isNotEmpty) {
+            isRowEmpty = false;
+            break;
+          }
+        }
+        
+        if (isRowEmpty) {
+          stats.emptyOrNoNumberRows++;
+          continue; // Пропускаем полностью пустую строку
+        }
+      }
+
+      // ---------- Данные ----------
+      stats.totalRows++;
+
+      final name = getCell(nameIdx);
+      final category =
+          categoryIdx != -1 ? getCell(categoryIdx) : currentCategory;
+      final composition = getCell(compositionIdx);
+      final manufacturer = getCell(manufacturerIdx);
+      final package = getCell(packageIdx);
+      final rate = getCell(rateIdx);
+      final priceStr = getCell(priceIdx);
+      final description = getCell(descriptionIdx);
+
+      // Изменяем функцию, чтобы она возвращала List<String>
+      List<String> normalizeTags(String input) {
+        if (input.isEmpty) return [];
+        return input.split(',')
+            .map((e) => e.trim())
+            .where((e) => e.isNotEmpty)
+            .map((e) => e[0].toUpperCase() + e.substring(1).toLowerCase())
+            .toList(); // <-- Возвращаем список, а не строку
+      }
+
+      final cultures = normalizeTags(getCell(culturesIdx));
+      final diseases = normalizeTags(getCell(diseasesIdx));
+
+      void bump(String k) {
+        stats.columnNonEmpty[k] = (stats.columnNonEmpty[k] ?? 0) + 1;
+      }
+
+      if (name.isNotEmpty) bump('Название');
+      if (category.isNotEmpty) bump('Категория');
+      if (composition.isNotEmpty) bump('Состав');
+      if (manufacturer.isNotEmpty) bump('Производитель');
+      if (package.isNotEmpty) bump('Упаковка');
+      if (rate.isNotEmpty) bump('Норма расхода');
+      if (priceStr.isNotEmpty) bump('Цена');
+
+      // ---------- Валидация ----------
+      if (name.isEmpty || category.isEmpty) {
+        stats.skipped++;
+        stats.skippedDetails.add({
+          'row': i + 1,
+          'name': name.isNotEmpty ? name : '(пусто)',
+          'reason': name.isEmpty ? 'Нет названия' : 'Нет категории',
+        });
+        continue;
+      }
+
+      // ---------- Цена (Пункт 8) ----------
+      double? price;
+      if (priceStr.isNotEmpty) {
+        price = _parseNumericValue(priceStr); // Пытаемся распарсить
+        
+        if (price == null) {
+          // Если не распарсилось, проверяем, может это текст ("по запросу")
+          if (_isTextPrice(priceStr)) {
+            price = null; 
+          } else {
+            // Это не число и не текст (например, дата или "1500-2000")
+            stats.skipped++;
+            stats.skippedDetails.add({
+              'row': i + 1,
+              'name': name,
+              'reason': 'Некорректная цена: "$priceStr"',
+            });
+            continue;
           }
         }
       }
-      for (var cell in row) {
-        if (cell?.value?.toString().trim().toLowerCase() == 'тип') {
-          return 'catalog';
+
+      // ---------- Норма расхода (проверка на дату/мусор) ----------
+      // Норму мы храним как String (т.к. бывают диапазоны "0,7-1,0"), 
+      // но проверим, не является ли она датой
+      if (rate.isNotEmpty) {
+        // Если это похоже на дату (например, 2026-10-19 или 19.10.2026) — это ошибка
+        if (RegExp(r'^\d{2,4}[\.\/-]\d{2}[\.\/-]\d{2,4}$').hasMatch(rate)) {
+          stats.skipped++;
+          stats.skippedDetails.add({
+            'row': i + 1,
+            'name': name,
+            'reason': 'Норма расхода записана как дата: "$rate"',
+          });
+          continue;
         }
       }
+
+      products.add(Product(
+        name: name,
+        category: category,
+        composition: composition.isNotEmpty ? composition : null,
+        manufacturer: manufacturer.isNotEmpty ? manufacturer : null,
+        package: package.isNotEmpty ? package : null,
+        consumptionRate: rate.isNotEmpty ? rate : null,
+        price: price,
+        description: description.isNotEmpty ? description : null,
+        cultures: cultures, 
+        diseases: diseases,
+      ));
+      stats.accepted++;
     }
-    return null;
+
+    return products;
   }
 
-  // ---- Диалог выбора листов ----
+  // ============================================================
+  // ДИАЛОГИ
+  // ============================================================
+
+  // ---- 1. Выбор листов ----
   Future<List<String>?> _showSheetSelectionDialog(
-      BuildContext context,
-      List<String> sheetNames,
-      ) async {
-    final Map<String, bool> selected = {for (var name in sheetNames) name: false};
+      BuildContext context, List<String> sheetNames) async {
+    final selected = <String, bool>{for (final n in sheetNames) n: false};
     String? errorText;
 
     return showDialog<List<String>>(
       context: context,
       barrierDismissible: false,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setState) {
-            return AlertDialog(
-              title: const Text('Выберите листы для импорта'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SizedBox(
-                    width: double.maxFinite,
-                    height: 300,
-                    child: ListView(
-                      children: sheetNames.map((name) {
-                        return CheckboxListTile(
-                          title: Text(name),
-                          value: selected[name] ?? false,
-                          onChanged: (value) {
-                            setState(() {
-                              selected[name] = value ?? false;
-                              if (errorText != null) errorText = null;
-                            });
-                          },
-                        );
-                      }).toList(),
-                    ),
-                  ),
-                  if (errorText != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Text(
-                        errorText!,
-                        style: const TextStyle(color: Colors.red),
-                      ),
-                    ),
-                ],
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) => AlertDialog(
+          title: const Text('Выберите листы для импорта'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: double.maxFinite,
+                height: 300,
+                child: ListView(
+                  children: sheetNames
+                      .map((n) => CheckboxListTile(
+                            title: Text(n),
+                            value: selected[n] ?? false,
+                            onChanged: (v) => setState(() {
+                              selected[n] = v ?? false;
+                              errorText = null;
+                            }),
+                          ))
+                      .toList(),
+                ),
               ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context, null),
-                  child: const Text('Отмена'),
+              if (errorText != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(errorText!,
+                      style: const TextStyle(color: Colors.red)),
                 ),
-                ElevatedButton(
-                  onPressed: () {
-                    final chosen = selected.entries
-                        .where((e) => e.value)
-                        .map((e) => e.key)
-                        .toList();
-                    if (chosen.isEmpty) {
-                      setState(() {
-                        errorText = 'Выберите хотя бы один лист';
-                      });
-                      return;
-                    }
-                    Navigator.pop(context, chosen);
-                  },
-                  child: const Text('Далее'),
-                ),
-              ],
-            );
-          },
-        );
-      },
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, null),
+              child: const Text('Отмена'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final chosen = selected.entries
+                    .where((e) => e.value)
+                    .map((e) => e.key)
+                    .toList();
+                if (chosen.isEmpty) {
+                  setState(
+                      () => errorText = 'Выберите хотя бы один лист');
+                  return;
+                }
+                Navigator.pop(ctx, chosen);
+              },
+              child: const Text('Далее'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
-  // ---- Диалог частичной обработки листов ----
-  Future<bool?> _showPartialImportDialog(
-      BuildContext context,
-      List<SheetInfo> invalidSheets,
-      List<SheetInfo> validSheets,
-      ) async {
-    String message = 'Некоторые листы не могут быть обработаны из-за отсутствия обязательных полей.\n\n';
-    message += '❌ Листы с пропусками:\n';
-    for (var info in invalidSheets) {
-      message += '  ${info.sheetName}: пропущены ${info.missingRequired.join(', ')}\n';
+  // ---- 2. Отчёт по анализу ----
+  Future<bool?> _showAnalysisReportDialog(
+    BuildContext context,
+    List<SheetAnalysis> analyses,
+    List<SheetRejection> rejectedAtAnalysis,
+  ) async {
+    // Считаем статистику
+    final validSheets = analyses.where((a) => a.hasRequired).toList();
+    final invalidSheets = analyses.where((a) => !a.hasRequired).toList();
+
+    final totalCount = analyses.length + rejectedAtAnalysis.length;
+    final validCount = validSheets.length;
+    final invalidCount = invalidSheets.length + rejectedAtAnalysis.length;
+
+    final buf = StringBuffer();
+    // ---------- Сводка ----------
+    buf.writeln('Всего выбрано листов: $totalCount');
+    buf.writeln('✅ Пригодных к импорту: $validCount');
+    buf.writeln('❌ Непригодных (будут пропущены): $invalidCount\n');
+
+    // ---------- Валидные листы ----------
+    if (validSheets.isNotEmpty) {
+      buf.writeln('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      buf.writeln('✅ ПРИГОДНЫЕ ЛИСТЫ:');
+      buf.writeln('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+      
+      for (final a in validSheets) {
+        buf.writeln('📄 "${a.sheetName}"');
+        buf.writeln(
+            '  Формат: ${a.format == 'price' ? 'прайс-лист' : 'каталог'}');
+        buf.writeln('  Строк данных (после шапки): ${a.dataRows.length}');
+
+        if (a.foundColumns.isNotEmpty) {
+          buf.writeln('  Найденные колонки:');
+          a.foundColumns.forEach((f, idxs) {
+            final labels = idxs
+                .map((i) => i < a.headerLabels.length
+                    ? a.headerLabels[i]
+                    : '#${i + 1}')
+                .join(', ');
+            buf.writeln('    ${_getFieldLabel(f)}: $labels');
+          });
+        } else {
+          buf.writeln('  ⚠️ Колонки не найдены');
+        }
+
+        if (a.hasCategoryColumn) {
+          final catColIdx = a.foundColumns['category']!.first;
+          final catLabel = catColIdx < a.headerLabels.length
+              ? a.headerLabels[catColIdx]
+              : 'колонка ${catColIdx + 1}';
+          buf.writeln('  Категория: из колонки "$catLabel"');
+        } else if (a.hasCategoryInSeparators) {
+          buf.writeln('  Категория: из строк-разделителей внутри данных');
+        } else {
+          buf.writeln('  ⚠️ Категорию надо будет ввести вручную');
+        }
+
+        if (a.missingRequired.isNotEmpty) {
+          buf.writeln('  ⚠️ Отсутствуют: ${a.missingRequired.join(', ')}');
+        }
+        buf.writeln();
+      }
     }
-    message += '\n✅ Листы, готовые к импорту:\n';
-    for (var info in validSheets) {
-      message += '  ${info.sheetName}\n';
+
+    // ---------- Невалидные и отклоненные листы ----------
+    if (invalidCount > 0) {
+      buf.writeln('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      buf.writeln('❌ НЕПРИГОДНЫЕ ЛИСТЫ (будут пропущены):');
+      buf.writeln('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+
+      // Листы, где нашли шапку, но нет обязательных колонок
+      for (final a in invalidSheets) {
+        buf.writeln('📄 "${a.sheetName}"');
+        buf.writeln('  Формат: ${a.format == 'price' ? 'прайс-лист' : 'каталог'}');
+        buf.writeln('  Причина: пропущены поля: ${a.missingRequired.join(', ')}');
+        buf.writeln();
+      }
+
+      // Листы, где вообще не нашли шапку или формат
+      for (final r in rejectedAtAnalysis) {
+        buf.writeln('📄 "${r.sheetName}"');
+        buf.writeln('  Причина: ${r.reason}');
+        buf.writeln();
+      }
     }
-    message += '\nПродолжить импорт только с пригодными листами?';
 
     return showDialog<bool>(
       context: context,
       barrierDismissible: false,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('Частичная обработка'),
-          content: Text(message),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Прервать'),
-            ),
-            ElevatedButton(
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text('Продолжить с пригодными'),
-            ),
-          ],
-        );
-      },
+      builder: (ctx) => AlertDialog(
+        title: const Text('Анализ листов'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Text(buf.toString(), style: const TextStyle(fontSize: 13)),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Продолжить'),
+          ),
+        ],
+      ),
     );
   }
 
-  // ---- Диалог выбора колонок (для дублей) ----
+
+    // ---- 2.5. Диалог частичной обработки ----
+  Future<bool?> _showPartialImportDialog(
+    BuildContext context,
+    List<SheetAnalysis> invalidSheets,
+    List<SheetAnalysis> validSheets,
+  ) async {
+    final buf = StringBuffer();
+    buf.writeln(
+        'Некоторые листы не могут быть импортированы из-за отсутствия '
+        'обязательных полей.\n');
+
+    buf.writeln('❌ Листы с пропусками:');
+    for (final a in invalidSheets) {
+      buf.writeln('  • "${a.sheetName}" — ${a.missingRequired.join(', ')}');
+    }
+
+    buf.writeln();
+    buf.writeln('✅ Листы, готовые к импорту:');
+    for (final a in validSheets) {
+      buf.writeln('  • "${a.sheetName}"');
+    }
+
+    buf.writeln();
+    buf.writeln('Продолжить импорт только с пригодными листами? '
+        'Непригодные будут проигнорированы.');
+
+    return showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Частичная обработка'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Text(buf.toString(),
+                style: const TextStyle(fontSize: 13)),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Прервать'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Продолжить с пригодными'),
+          ),
+        ],
+      ),
+    );
+  }
+
+    // ---- Диалог о дубликатах в БД ----
+  Future<String?> _showDuplicatesDialog(
+    BuildContext context,
+    List<Product> duplicates,
+    int uniqueCount,
+  ) async {
+    final buf = StringBuffer();
+    buf.writeln('Найдено ${duplicates.length} препаратов, которые уже есть в базе.\n');
+    buf.writeln('Новых препаратов: $uniqueCount.\n');
+    buf.writeln('Как поступить с существующими?');
+    
+    if (duplicates.isNotEmpty) {
+      buf.writeln('\nПримеры совпадений:');
+      for (final p in duplicates.take(5)) {
+        buf.writeln('  • "${p.name}" — категория: ${p.category}');
+      }
+      if (duplicates.length > 5) {
+        buf.writeln('  ... и ещё ${duplicates.length - 5}');
+      }
+    }
+
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Дубликаты в базе'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Text(buf.toString(), style: const TextStyle(fontSize: 13)),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'cancel'),
+            child: const Text('Отмена'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'update_only'),
+            child: const Text('Только обновление'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'skip'),
+            child: const Text('Добавить новые'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, 'update_and_add'),
+            child: const Text('Обновить и добавить'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ---- 3. Выбор колонок при дублях ----
   Future<Map<String, int>?> _showColumnSelectionDialog(
-      BuildContext context,
-      String sheetName,
-      Map<String, List<int>> dupFields,
-      List<dynamic> rows,
-      ) async {
-    // Для каждого поля с дублями создаём группу выбора
-    // Используем радиокнопки
-    Map<String, int> selectedMap = {};
-    for (var entry in dupFields.entries) {
-      selectedMap[entry.key] = entry.value.first; // по умолчанию первый индекс
+      BuildContext context, SheetAnalysis a) async {
+    final dupFields = <String, List<int>>{};
+    a.foundColumns.forEach((f, idxs) {
+      if (idxs.length > 1) dupFields[f] = idxs;
+    });
+
+    final selectedMap = <String, int>{};
+    for (final e in dupFields.entries) {
+      selectedMap[e.key] = e.value.first;
     }
 
     return showDialog<Map<String, int>>(
       context: context,
       barrierDismissible: false,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setState) {
-            return AlertDialog(
-              title: Text('Выбор колонок для листа "$sheetName"'),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: dupFields.entries.map((entry) {
-                    final field = entry.key;
-                    final indices = entry.value;
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          _getFieldLabel(field),
-                          style: const TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                        ...indices.map((idx) {
-                          // получаем заголовок колонки из первой строки (заголовок)
-                          // Но мы не храним заголовок в SheetInfo, нужно передать отдельно
-                          // Мы можем получить заголовок из rows? Нет, rows — это строки данных.
-                          // Придётся хранить заголовки отдельно. Для упрощения покажем просто индексы.
-                          // Улучшим: в SheetInfo добавим заголовки.
-                          // Но для этого надо переделать _analyzeSheet.
-                          // Пока обойдёмся индексами.
-                          return Row(
-                            children: [
-                              Radio<int>(
-                                value: idx,
-                                groupValue: selectedMap[field],
-                                onChanged: (value) {
-                                  setState(() {
-                                    selectedMap[field] = value!;
-                                  });
-                                },
-                              ),
-                              Text('Колонка ${idx+1}'),
-                            ],
-                          );
-                        }).toList(),
-                        const Divider(),
-                      ],
-                    );
-                  }).toList(),
-                ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) => AlertDialog(
+          title: Text('Выбор колонок: "${a.sheetName}"'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: dupFields.entries.map((e) {
+                  final field = e.key;
+                  final idxs = e.value;
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8, bottom: 4),
+                        child: Text(_getFieldLabel(field),
+                            style: const TextStyle(
+                                fontWeight: FontWeight.bold)),
+                      ),
+                      ...idxs.map((idx) => RadioListTile<int>(
+                            value: idx,
+                            groupValue: selectedMap[field],
+                            onChanged: (v) => setState(
+                                () => selectedMap[field] = v!),
+                            title: Text(
+                              (idx < a.headerLabels.length &&
+                                      a.headerLabels[idx].isNotEmpty)
+                                  ? a.headerLabels[idx]
+                                  : 'Колонка ${idx + 1}',
+                            ),
+                          )),
+                      const Divider(),
+                    ],
+                  );
+                }).toList(),
               ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context, null),
-                  child: const Text('Отмена'),
-                ),
-                ElevatedButton(
-                  onPressed: () {
-                    // Проверяем, что для каждого дубля выбран индекс
-                    for (var field in dupFields.keys) {
-                      if (selectedMap[field] == null) {
-                        // этого не должно случиться
-                        return;
-                      }
-                    }
-                    Navigator.pop(context, selectedMap);
-                  },
-                  child: const Text('Применить'),
-                ),
-              ],
-            );
-          },
-        );
-      },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, null),
+              child: const Text('Отмена'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, selectedMap),
+              child: const Text('Применить'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
-  String _getFieldLabel(String field) {
-    switch (field) {
-      case 'name': return 'Название';
-      case 'category': return 'Категория';
-      case 'composition': return 'Состав';
-      case 'manufacturer': return 'Производитель';
-      case 'package': return 'Упаковка';
-      case 'rate': return 'Норма расхода';
-      case 'price': return 'Цена';
-      default: return field;
-    }
-  }
+    // ---- 4. Ручной ввод категории ----
+  Future<String?> _showManualCategoryDialog(
+      BuildContext context, String sheetName) async {
+    final controller = TextEditingController();
+    // Получаем уникальные названия категорий и сортируем их по алфавиту
+    final knownCategories = typeVariants.values.toSet().toList()..sort();
 
-  // ---- Парсинг с выбранными колонками ----
-  List<Product> _parseSheetWithSelectedColumns(
-      String sheetName,
-      String format,
-      Map<String, List<int>> selectedColumns,
-      List<dynamic> rows,
-      SheetStats stats,
-      ) {
-    List<Product> products = [];
-    // Для каждого формата определяем, как получать категорию
-    // Для прайс-листа категория может быть из разделителей или из ручного ввода
-    // Здесь мы не можем получить ручную категорию, т.к. она не передаётся.
-    // Будем использовать такой же подход, как в _analyzeSheet: ищем разделители в строках.
-    // Но у нас есть только rows (данные после заголовка), а разделители могут быть в строках выше заголовка.
-    // Поэтому лучше передать в эту функцию исходный sheet, но мы его не храним.
-    // Переделаем: будем передавать sheet целиком.
-    // Для простоты оставим как есть, но тогда для прайс-листа категория должна быть определена ранее.
-    // В текущей реализации мы решили, что категория обязательна и она либо найдена в колонке, либо вручную.
-    // Если она найдена в колонке, то она будет в selectedColumns['category'].
-    // Если нет, то у нас есть ошибка, и такой лист не попадёт в обработку.
-    // Поэтому здесь предполагаем, что selectedColumns содержит все необходимые индексы.
+    String? selectedValue;
+    bool isCustom = false;
+    String? errorText; // Для вывода ошибок валидации
 
-    // Проверяем обязательные поля
-    if (!selectedColumns.containsKey('name') || selectedColumns['name']!.isEmpty) {
-      // Этот лист не должен был попасть сюда, но на всякий случай
-      return [];
-    }
-    int nameIdx = selectedColumns['name']![0];
-    int? categoryIdx = selectedColumns.containsKey('category') && selectedColumns['category']!.isNotEmpty
-        ? selectedColumns['category']![0]
-        : null;
-    int? compositionIdx = selectedColumns.containsKey('composition') && selectedColumns['composition']!.isNotEmpty
-        ? selectedColumns['composition']![0]
-        : null;
-    int? manufacturerIdx = selectedColumns.containsKey('manufacturer') && selectedColumns['manufacturer']!.isNotEmpty
-        ? selectedColumns['manufacturer']![0]
-        : null;
-    int? packageIdx = selectedColumns.containsKey('package') && selectedColumns['package']!.isNotEmpty
-        ? selectedColumns['package']![0]
-        : null;
-    int? rateIdx = selectedColumns.containsKey('rate') && selectedColumns['rate']!.isNotEmpty
-        ? selectedColumns['rate']![0]
-        : null;
-    int? priceIdx = selectedColumns.containsKey('price') && selectedColumns['price']!.isNotEmpty
-        ? selectedColumns['price']![0]
-        : null;
-
-    // Для прайс-листа категория может определяться из разделителей, но здесь мы не можем их получить.
-    // Поэтому будем считать, что если categoryIdx == null, то категория будет получена из строк-разделителей или имени листа.
-    // Но поскольку это логика сложная, мы пропустим её здесь, и будем использовать ручной выбор категории, если он был сделан.
-    // В нашей архитектуре мы решили, что если категория не найдена в колонке, то лист не проходит проверку обязательных полей.
-    // Поэтому сюда попадают только листы, где категория есть (в колонке или вручную выбрана).
-    // Вручную выбранная категория не может быть передана через индексы.
-    // Значит, нам нужно хранить отдельно выбранную категорию для листа.
-    // Для упрощения оставим, что категория должна быть в колонке.
-    // Тогда придётся пересмотреть логику: если категория не найдена в колонке, мы должны добавить колонку с категорией, но это сложно.
-    // Поскольку мы ранее решили, что категория может быть определена из разделителей или имени листа, мы должны сохранить эту информацию в SheetInfo.
-    // Но для простоты и в рамках текущего задания, предположим, что категория всегда есть в колонке (для каталога) или в разделителях/имени (для прайс-листа), и мы можем вычислить её при парсинге.
-    // Для этого нужно передать sheet целиком. Переделаем функцию _parseSheetWithSelectedColumns, чтобы она принимала sheet, а не только rows.
-
-    // Так как мы уже вышли за рамки простого исправления, предлагаю упростить: обязательные поля — название и категория, и они должны быть в колонках. Для прайс-листа категорию будем определять отдельно, как мы делали ранее. Но тогда код нужно переписать более тщательно.
-
-    // В целях экономии времени, я оставлю эту функцию заглушкой, а вместо неё буду использовать старый парсинг с учётом выбранных колонок, но добавив определение категории из разделителей и имени листа.
-
-    // Для чистоты кода я перепишу логику так, чтобы категория определялась аналогично _analyzeSheet.
-    // Но поскольку мы уже углубились, давайте реализуем полную версию.
-
-    // Вернёмся к началу: перепишем _analyzeSheet так, чтобы сохранять не только индексы, но и саму категорию, если она определена не через колонку.
-    // Для этого добавим в SheetInfo поле manualCategory.
-    // И перепишем парсинг.
-
-    // Однако это уже слишком большой объём для одного сообщения. Предлагаю сделать упрощённый вариант: считаем, что категория всегда присутствует в колонке (для каталога) или определяется из разделителей и имени листа, и мы можем вычислить её при парсинге, обходя строки.
-
-    // Я реализую парсинг с учётом того, что категория может быть в колонке, а если нет — мы ищем разделители в строках (но они находятся до данных, а мы передаём только строки после заголовка). Поэтому нужно передать весь sheet.
-
-    // Давайте изменим подход: будем передавать в парсинг весь sheet и индекс заголовка.
-
-    // Это становится слишком громоздким для этого ответа. Я предлагаю альтернативу: мы уже имеем рабочий код парсинга, который мы написали ранее (в предыдущей версии settings_screen.dart). Мы можем его адаптировать, добавив выбор колонок.
-
-    // Поскольку времени на полную переработку нет, я предложу компромисс: будем использовать ранее написанные функции _parseCatalogSheet и _parsePriceSheet, но добавим в них параметры для выбранных индексов. А выбор индексов мы уже сделали выше.
-
-    // Поэтому я перепишу методы _parseCatalogSheet и _parsePriceSheet так, чтобы они принимали Map<String, int> с выбранными индексами, и внутри использовали их.
-
-    // Это будет проще и быстрее.
-
-    // Приступим.
-    // Но для этого нужно переделать _analyzeSheet, чтобы он возвращал выбранные индексы.
-    // Мы это уже сделали в _showColumnSelectionDialog.
-
-    // В итоге, я предлагаю следующий план:
-    // 1. В _analyzeSheet сохраняем все найденные индексы (список).
-    // 2. После выбора пользователя, мы обновляем foundColumns, оставляя только по одному индексу.
-    // 3. Затем вызываем парсинг с этими индексами.
-
-    // Это я уже реализовал в коде выше: после диалога выбора обновляем info.foundColumns.
-    // Теперь осталось написать парсинг, который использует эти индексы.
-
-    // Я использую старые функции _parseCatalogSheet и _parsePriceSheet, но адаптирую их, передавая индексы.
-
-    // Так как код уже длинный, я реализую это в финальной версии.
-
-    return products; // временно
-  }
-
-  // --- Диалог выбора листов ---
-  Future<List<String>?> _showSheetSelectionDialog(
-    BuildContext context,
-    List<String> sheetNames,
-  ) async {
-    final Map<String, bool> selected = {for (var name in sheetNames) name: false};
-
-    return showDialog<List<String>>(
+    return showDialog<String>(
       context: context,
       barrierDismissible: false,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setState) {
-            return AlertDialog(
-              title: const Text('Выберите листы для импорта'),
-              content: SizedBox(
-                width: double.maxFinite,
-                height: 300,
-                child: ListView(
-                  children: sheetNames.map((name) {
-                    return CheckboxListTile(
-                      title: Text(name),
-                      value: selected[name] ?? false,
-                      onChanged: (value) {
-                        setState(() {
-                          selected[name] = value ?? false;
-                        });
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) {
+          return AlertDialog(
+            title: Text('Категория для "$sheetName"'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'В файле не найдена колонка с категорией и строки-разделители. '
+                    'Выберите категорию из списка или введите своё значение:',
+                    style: TextStyle(fontSize: 13, color: Colors.black87),
+                  ),
+                  const SizedBox(height: 16),
+                  DropdownButtonFormField<String>(
+                    decoration: InputDecoration(
+                      labelText: 'Категория',
+                      border: const OutlineInputBorder(),
+                      errorText: errorText, // Показываем ошибку прямо здесь
+                    ),
+                    value: selectedValue,
+                    items: [
+                      ...knownCategories.map((c) => DropdownMenuItem(
+                            value: c,
+                            child: Text(c),
+                          )),
+                      const DropdownMenuItem(
+                        value: '__other__',
+                        child: Text('Другое (ввести вручную)...'),
+                      ),
+                    ],
+                    onChanged: (val) {
+                      setState(() {
+                        selectedValue = val;
+                        isCustom = (val == '__other__');
+                        errorText = null; // Сбрасываем ошибку при изменении
+                        if (isCustom) {
+                          controller.clear();
+                        }
+                      });
+                    },
+                  ),
+                  if (isCustom) ...[
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: controller,
+                      autofocus: true,
+                      textCapitalization: TextCapitalization.sentences,
+                      keyboardType: TextInputType.text,
+                      textInputAction: TextInputAction.done,
+                      onChanged: (_) {
+                        if (errorText != null) {
+                          setState(() => errorText = null);
+                        }
                       },
-                    );
-                  }).toList(),
-                ),
+                      onSubmitted: (_) => _handleSubmit(
+                        ctx,
+                        isCustom,
+                        selectedValue,
+                        controller,
+                        (err) => setState(() => errorText = err),
+                      ),
+                      decoration: const InputDecoration(
+                        labelText: 'Своя категория',
+                        hintText: 'Например, Регуляторы роста',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
+                ],
               ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context, null),
-                  child: const Text('Отмена'),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, null),
+                child: const Text('Отмена'),
+              ),
+              ElevatedButton(
+                onPressed: () => _handleSubmit(
+                  ctx,
+                  isCustom,
+                  selectedValue,
+                  controller,
+                  (err) => setState(() => errorText = err),
                 ),
-                ElevatedButton(
-                  onPressed: () {
-                    final chosen = selected.entries
-                        .where((e) => e.value)
-                        .map((e) => e.key)
-                        .toList();
-                    Navigator.pop(context, chosen);
-                  },
-                  child: const Text('Далее'),
-                ),
-              ],
-            );
-          },
-        );
-      },
+                child: const Text('ОК'),
+              ),
+            ],
+          );
+        },
+      ),
     );
   }
 
-  // --- Определение формата листа ---
-  String? _detectFormat(Sheet sheet) {
-    // Проверяем первые 10 строк на наличие заголовка "Тип" (для каталога)
-    for (int i = 0; i < sheet.rows.length && i < 10; i++) {
-      final row = sheet.rows[i];
-      if (row.isEmpty) continue;
-      for (var cell in row) {
-        final val = cell?.value?.toString().trim().toLowerCase() ?? '';
-        if (val == 'тип') {
-          return 'catalog';
-        }
-      }
-    }
-
-    // Проверяем, есть ли строка с "№ п/п" и "Препараты" (прайс-лист)
-    for (int i = 0; i < sheet.rows.length && i < 20; i++) {
-      final row = sheet.rows[i];
-      if (row.isEmpty) continue;
-      final firstCell = row[0]?.value?.toString().trim() ?? '';
-      if (firstCell == '№ п/п') {
-        // есть колонка "Препараты"?
-        for (var cell in row) {
-          final val = cell?.value?.toString().trim() ?? '';
-          if (val == 'Препараты') {
-            return 'price';
-          }
-        }
-      }
-    }
-
-    return null;
-  }
-
-  // --- Парсинг каталога (формат catalog_full) ---
-  void _parseCatalogSheet(
-    Sheet sheet,
-    String sheetName,
-    List<Product> products,
-    ImportStats stats,
+  // Вспомогательный метод для валидации и возврата результата
+  void _handleSubmit(
+    BuildContext ctx,
+    bool isCustom,
+    String? selectedValue,
+    TextEditingController controller,
+    void Function(String?) setError,
   ) {
-    // Находим строку заголовка (ищем "Название")
-    int headerRowIndex = -1;
-    for (int i = 0; i < sheet.rows.length; i++) {
-      final row = sheet.rows[i];
-      if (row.isEmpty) continue;
-      final firstCell = row[0]?.value?.toString().trim().toLowerCase() ?? '';
-      if (firstCell == 'название') {
-        headerRowIndex = i;
-        break;
+    if (!isCustom) {
+      if (selectedValue == null) {
+        setError('Выберите категорию из списка');
+        return;
       }
-    }
-    if (headerRowIndex == -1) return;
-
-    final headerRow = sheet.rows[headerRowIndex];
-    // Определяем индексы колонок (поиск по точному совпадению или частичному)
-    int nameIdx = -1, typeIdx = -1, compositionIdx = -1, descriptionIdx = -1;
-    int rateIdx = -1, packageIdx = -1, priceIdx = -1, manufacturerIdx = -1;
-
-    for (int i = 0; i < headerRow.length; i++) {
-      final cell = headerRow[i]?.value?.toString().trim() ?? '';
-      final lower = cell.toLowerCase();
-      if (lower == 'название') {
-        nameIdx = i;
-      } else if (lower == 'тип') {
-        typeIdx = i;
-      } else if (lower == 'действующие вещества' || lower.contains('вещества')) {
-        compositionIdx = i;
-      } else if (lower == 'описание') {
-        descriptionIdx = i;
-      } else if (lower == 'норма расхода') {
-        rateIdx = i;
-      } else if (lower == 'фасовка') {
-        packageIdx = i;
-      } else if (lower == 'цена, руб.' || lower == 'цена') {
-        priceIdx = i;
-      } else if (lower == 'производитель') {
-        manufacturerIdx = i;
-      }
+      Navigator.pop(ctx, selectedValue);
+      return;
     }
 
-    // Если не нашли обязательные колонки (название, тип) — пропускаем лист
-    if (nameIdx == -1 || typeIdx == -1) return;
+    final rawText = controller.text.trim();
 
-    // Собираем статистику по колонкам (количество непустых)
-    Map<String, int> columnStats = {};
-    columnStats['Название'] = 0;
-    columnStats['Тип'] = 0;
-    columnStats['Действующие вещества'] = 0;
-    columnStats['Описание'] = 0;
-    columnStats['Норма расхода'] = 0;
-    columnStats['Фасовка'] = 0;
-    columnStats['Цена'] = 0;
-    columnStats['Производитель'] = 0;
-
-    // Парсим строки данных
-    for (int i = headerRowIndex + 1; i < sheet.rows.length; i++) {
-      final row = sheet.rows[i];
-      if (row.isEmpty) continue;
-
-      stats.totalRows++;
-
-      // Извлекаем значения
-      String name = (nameIdx != -1 && row.length > nameIdx)
-          ? row[nameIdx]?.value?.toString()?.trim() ?? ''
-          : '';
-      String type = (typeIdx != -1 && row.length > typeIdx)
-          ? row[typeIdx]?.value?.toString()?.trim() ?? ''
-          : '';
-      String composition = (compositionIdx != -1 && row.length > compositionIdx)
-          ? row[compositionIdx]?.value?.toString()?.trim() ?? ''
-          : '';
-      String description = (descriptionIdx != -1 && row.length > descriptionIdx)
-          ? row[descriptionIdx]?.value?.toString()?.trim() ?? ''
-          : '';
-      String rate = (rateIdx != -1 && row.length > rateIdx)
-          ? row[rateIdx]?.value?.toString()?.trim() ?? ''
-          : '';
-      String package = (packageIdx != -1 && row.length > packageIdx)
-          ? row[packageIdx]?.value?.toString()?.trim() ?? ''
-          : '';
-      String priceStr = (priceIdx != -1 && row.length > priceIdx)
-          ? row[priceIdx]?.value?.toString()?.trim() ?? ''
-          : '';
-      String manufacturer = (manufacturerIdx != -1 && row.length > manufacturerIdx)
-          ? row[manufacturerIdx]?.value?.toString()?.trim() ?? ''
-          : '';
-
-      // Обновляем статистику по колонкам (непустые значения)
-      if (name.isNotEmpty) {
-        columnStats['Название'] = (columnStats['Название'] ?? 0) + 1;
-      }
-      if (type.isNotEmpty) {
-        columnStats['Тип'] = (columnStats['Тип'] ?? 0) + 1;
-      }
-      if (composition.isNotEmpty) {
-        columnStats['Действующие вещества'] = (columnStats['Действующие вещества'] ?? 0) + 1;
-      }
-      if (description.isNotEmpty) {
-        columnStats['Описание'] = (columnStats['Описание'] ?? 0) + 1;
-      }
-      if (rate.isNotEmpty) {
-        columnStats['Норма расхода'] = (columnStats['Норма расхода'] ?? 0) + 1;
-      }
-      if (package.isNotEmpty) {
-        columnStats['Фасовка'] = (columnStats['Фасовка'] ?? 0) + 1;
-      }
-      if (priceStr.isNotEmpty) {
-        columnStats['Цена'] = (columnStats['Цена'] ?? 0) + 1;
-      }
-      if (manufacturer.isNotEmpty) {
-        columnStats['Производитель'] = (columnStats['Производитель'] ?? 0) + 1;
-      }
-
-      // Валидация обязательных полей (название и тип)
-      if (name.isEmpty || type.isEmpty) {
-        stats.skipped++;
-        stats.skippedDetails.add({
-          'row': i + 1,
-          'name': name.isNotEmpty ? name : '(пусто)',
-          'reason': 'Отсутствует название или тип'
-        });
-        continue;
-      }
-
-      // Парсим цену
-      double? price;
-      if (priceStr.isNotEmpty) {
-        price = double.tryParse(priceStr.replaceAll(',', '.').replaceAll(' ', ''));
-        if (price == null) {
-          stats.skipped++;
-          stats.skippedDetails.add({
-            'row': i + 1,
-            'name': name,
-            'reason': 'Некорректная цена: "$priceStr"'
-          });
-          continue;
-        }
-      }
-
-      // Всё ок — добавляем продукт
-      products.add(Product(
-        name: name,
-        category: type,
-        composition: composition.isNotEmpty ? composition : null,
-        manufacturer: manufacturer.isNotEmpty ? manufacturer : null,
-        package: package.isNotEmpty ? package : null,
-        consumptionRate: rate.isNotEmpty ? rate : null,
-        price: price,
-      ));
-      stats.accepted++;
+    // 1. Проверка на пустоту
+    if (rawText.isEmpty) {
+      setError('Введите название категории');
+      return;
     }
 
-    // Сохраняем статистику по колонкам для отчёта
-    stats.columnNonEmpty = columnStats;
+    // 2. Проверка длины (например, не менее 3 символов)
+    if (rawText.length < 3) {
+      setError('Название категории слишком короткое');
+      return;
+    }
+
+    // 3. Проверка на допустимые символы (только буквы, пробелы и дефисы)
+    // Отсекаем строки, состоящие только из цифр или спецсимволов (типа "123" или "...")
+    final hasLetters = RegExp(r'[а-яА-Яa-zA-Z]').hasMatch(rawText);
+    if (!hasLetters) {
+      setError('Название должно содержать буквы');
+      return;
+    }
+
+    // 4. Нормализация и распознавание
+    // Пытаемся сопоставить введенное значение с известными категориями
+    // (сработает, если ввели "гербициды" с маленькой буквы или "гербециды" с опечаткой)
+    String finalCategory = rawText;
+    final matchedCategory = _matchCategoryWord(rawText);
+    if (matchedCategory != null) {
+      finalCategory = matchedCategory;
+    } else {
+      // Если это совершенно новое слово, делаем первую букву заглавной, остальные строчными
+      // Например, "регуляторы РОСТА" -> "Регуляторы роста"
+      finalCategory = rawText[0].toUpperCase() + 
+                      rawText.substring(1).toLowerCase();
+    }
+
+    Navigator.pop(ctx, finalCategory);
   }
 
-  // --- Парсинг прайс-листа (формат с разделителями) ---
-  void _parsePriceSheet(
-    Sheet sheet,
-    String sheetName,
-    List<Product> products,
-    ImportStats stats,
-  ) {
-    // Ищем строку с заголовками "№ п/п" и "Препараты"
-    int headerRowIndex = -1;
-    for (int i = 0; i < sheet.rows.length; i++) {
-      final row = sheet.rows[i];
-      if (row.isEmpty) continue;
-      final firstCell = row[0]?.value?.toString().trim() ?? '';
-      if (firstCell == '№ п/п') {
-        // проверяем наличие "Препараты"
-        for (var cell in row) {
-          if (cell?.value?.toString().trim() == 'Препараты') {
-            headerRowIndex = i;
-            break;
-          }
-        }
-        if (headerRowIndex != -1) break;
-      }
-    }
-    if (headerRowIndex == -1) return;
-
-    final headerRow = sheet.rows[headerRowIndex];
-    // Определяем индексы колонок
-    int nameIdx = -1, compositionIdx = -1, manufacturerIdx = -1;
-    int packageIdx = -1, rateIdx = -1, priceIdx = -1;
-
-    for (int i = 0; i < headerRow.length; i++) {
-      final cell = headerRow[i]?.value?.toString().trim() ?? '';
-      if (cell == 'Препараты') {
-        nameIdx = i;
-      } else if (cell == 'Состав') {
-        compositionIdx = i;
-      } else if (cell == 'Производитель') {
-        manufacturerIdx = i;
-      } else if (cell == 'Упаковка') {
-        packageIdx = i;
-      } else if (cell.contains('Норма расхода')) {
-        rateIdx = i;
-      } else if (cell.contains('Цена')) {
-        priceIdx = i;
-      }
-    }
-
-    if (nameIdx == -1) return; // нет колонки "Препараты"
-
-    // Словарь соответствия ключевых слов типам
-    final Map<String, String> typeVariants = {
-      'ГЕРБИЦИДЫ': 'Гербициды',
-      'ГЕРБЕЦИДЫ': 'Гербициды',
-      'ИНСЕКТИЦИДЫ': 'Инсектициды',
-      'ФУНГИЦИДЫ': 'Фунгициды',
-      'ДЕСИКАНТЫ': 'Десиканты',
-      'ПРОТРАВИТЕЛИ': 'Протравители',
-      'ФУМИГАНТЫ': 'Фумиганты',
-      'СПЕЦПРЕПАРАТЫ': 'Спецпрепараты',
-      'РОДЕНТИЦИДЫ': 'Родентициды',
-    };
-
-    // Определяем начальную категорию: пробуем взять из строк выше заголовка
-    String currentCategory = '';
-    for (int i = headerRowIndex - 1; i >= 0; i--) {
-      final row = sheet.rows[i];
-      if (row.isEmpty) continue;
-      final firstCell = row[0]?.value?.toString().trim().toUpperCase() ?? '';
-      if (typeVariants.containsKey(firstCell)) {
-        currentCategory = typeVariants[firstCell]!;
-        break;
-      }
-    }
-
-    // Если не нашли, используем имя листа (если оно не "Table 2" и не содержит "ПРАЙС")
-    if (currentCategory.isEmpty) {
-      final upper = sheetName.trim().toUpperCase();
-      if (typeVariants.containsKey(upper)) {
-        currentCategory = typeVariants[upper]!;
-      } else if (!upper.contains('TABLE') && !upper.contains('ПРАЙС')) {
-        currentCategory = sheetName.trim();
-      }
-    }
-
-    // Статистика по колонкам для прайс-листа
-    Map<String, int> columnStats = {};
-    columnStats['Название'] = 0;
-    columnStats['Состав'] = 0;
-    columnStats['Производитель'] = 0;
-    columnStats['Упаковка'] = 0;
-    columnStats['Норма расхода'] = 0;
-    columnStats['Цена'] = 0;
-
-    // Парсим строки
-    for (int i = headerRowIndex + 1; i < sheet.rows.length; i++) {
-      final row = sheet.rows[i];
-      if (row.isEmpty) continue;
-
-      stats.totalRows++;
-
-      final firstCell = row[0]?.value?.toString().trim().toUpperCase() ?? '';
-
-      // Проверяем, не является ли строка разделителем типов
-      if (typeVariants.containsKey(firstCell)) {
-        currentCategory = typeVariants[firstCell]!;
-        continue;
-      }
-
-      // Пропускаем строки, где нет номера (не данные)
-      if (firstCell.isEmpty || !RegExp(r'^\d+$').hasMatch(firstCell)) continue;
-
-      // Извлекаем данные
-      String name = (nameIdx != -1 && row.length > nameIdx)
-          ? row[nameIdx]?.value?.toString()?.trim() ?? ''
-          : '';
-      if (name.isEmpty) {
-        stats.skipped++;
-        stats.skippedDetails.add({
-          'row': i + 1,
-          'name': '(пусто)',
-          'reason': 'Отсутствует название препарата'
-        });
-        continue;
-      }
-
-      String composition = (compositionIdx != -1 && row.length > compositionIdx)
-          ? row[compositionIdx]?.value?.toString()?.trim() ?? ''
-          : '';
-      String manufacturer = (manufacturerIdx != -1 && row.length > manufacturerIdx)
-          ? row[manufacturerIdx]?.value?.toString()?.trim() ?? ''
-          : '';
-      String package = (packageIdx != -1 && row.length > packageIdx)
-          ? row[packageIdx]?.value?.toString()?.trim() ?? ''
-          : '';
-      String rate = (rateIdx != -1 && row.length > rateIdx)
-          ? row[rateIdx]?.value?.toString()?.trim() ?? ''
-          : '';
-      String priceStr = (priceIdx != -1 && row.length > priceIdx)
-          ? row[priceIdx]?.value?.toString()?.trim() ?? ''
-          : '';
-
-      // Обновляем статистику по колонкам
-      if (name.isNotEmpty) {
-        columnStats['Название'] = (columnStats['Название'] ?? 0) + 1;
-      }
-      if (composition.isNotEmpty) {
-        columnStats['Состав'] = (columnStats['Состав'] ?? 0) + 1;
-      }
-      if (manufacturer.isNotEmpty) {
-        columnStats['Производитель'] = (columnStats['Производитель'] ?? 0) + 1;
-      }
-      if (package.isNotEmpty) {
-        columnStats['Упаковка'] = (columnStats['Упаковка'] ?? 0) + 1;
-      }
-      if (rate.isNotEmpty) {
-        columnStats['Норма расхода'] = (columnStats['Норма расхода'] ?? 0) + 1;
-      }
-      if (priceStr.isNotEmpty) {
-        columnStats['Цена'] = (columnStats['Цена'] ?? 0) + 1;
-      }
-
-      // Если категория не определена — пропускаем
-      if (currentCategory.isEmpty) {
-        stats.skipped++;
-        stats.skippedDetails.add({
-          'row': i + 1,
-          'name': name,
-          'reason': 'Не удалось определить категорию препарата'
-        });
-        continue;
-      }
-
-      // Парсим цену
-      double? price;
-      if (priceStr.isNotEmpty) {
-        price = double.tryParse(priceStr.replaceAll(',', '.').replaceAll(' ', ''));
-        if (price == null) {
-          stats.skipped++;
-          stats.skippedDetails.add({
-            'row': i + 1,
-            'name': name,
-            'reason': 'Некорректная цена: "$priceStr"'
-          });
-          continue;
-        }
-      }
-
-      // Всё ок — добавляем
-      products.add(Product(
-        name: name,
-        category: currentCategory,
-        composition: composition.isNotEmpty ? composition : null,
-        manufacturer: manufacturer.isNotEmpty ? manufacturer : null,
-        package: package.isNotEmpty ? package : null,
-        consumptionRate: rate.isNotEmpty ? rate : null,
-        price: price,
-      ));
-      stats.accepted++;
-    }
-
-    stats.columnNonEmpty = columnStats;
-  }
-
-  // --- Диалог отчёта с подтверждением ---
+  // ---- 5. Итоговый отчёт ----
   Future<bool?> _showImportReportDialog(
     BuildContext context,
-    ImportStats stats,
-    int acceptedCount,
-  ) async {
-    // Формируем текст отчёта
-    String report = 'Обработано строк: ${stats.totalRows}\n';
-    report += 'Принято к импорту: $acceptedCount\n';
-    report += 'Пропущено (ошибки): ${stats.skipped}\n\n';
+    Map<String, SheetStats> allStats, {
+    required int totalParsed,
+    required int addedCount,
+    required int updatedCount,
+    required int skippedDuplicatesCount,
+    bool dryRun = false,
+    List<SheetAnalysis> rejectedSheets = const [],
+    List<SheetRejection> rejectedReasons = const [],
+  }) async {
+    final buf = StringBuffer();
+    
+    // Считаем общее количество ошибок по всем листам
+    final totalErrors = allStats.values.fold<int>(0, (sum, s) => sum + s.skipped);
 
-    if (stats.columnNonEmpty.isNotEmpty) {
-      report += 'Заполненность колонок (непустые значения):\n';
-      stats.columnNonEmpty.forEach((key, value) {
-        report += '  $key: $value\n';
-      });
-      report += '\n';
+    // ---------- Сводка ----------
+    buf.writeln('📊 ИТОГОВАЯ СТАТИСТИКА:');
+    buf.writeln('Всего строк прошло валидацию: $totalParsed');
+    
+    if (addedCount > 0) {
+      buf.writeln('✅ Будет добавлено новых: $addedCount');
+    }
+    if (updatedCount > 0) {
+      buf.writeln('♻️ Будет обновлено существующих: $updatedCount');
+    }
+    if (skippedDuplicatesCount > 0) {
+      buf.writeln('⏭️ Пропущено дубликатов: $skippedDuplicatesCount');
+    }
+    if (totalErrors > 0) {
+      buf.writeln('❌ Пропущено из-за ошибок: $totalErrors');
+    }
+    buf.writeln();
+
+    // ---------- Детализация по листам ----------
+    buf.writeln('📋 ДЕТАЛИЗАЦИЯ ПО ЛИСТАМ:');
+    for (final e in allStats.entries) {
+      final s = e.value;
+      if (s.totalRows == 0) continue; // Пропускаем пустые
+
+      buf.writeln('📄 "${e.key}"');
+      buf.writeln('  Обработано строк: ${s.totalRows}');
+      buf.writeln('  Принято: ${s.accepted}');
+      
+      if (s.skipped > 0) {
+        buf.writeln('  Пропущено (ошибки): ${s.skipped}');
+        // Выводим первые 3 ошибки сразу
+        for (final item in s.skippedDetails.take(3)) {
+          buf.writeln('    - Строка ${item['row']}: "${item['name']}" — ${item['reason']}');
+        }
+      }
+      buf.writeln();
     }
 
-    if (stats.skippedDetails.isNotEmpty) {
-      report += 'Пропущенные записи (первые 5):\n';
-      final details = stats.skippedDetails.take(5);
-      for (var item in details) {
-        report += '  Строка ${item['row']}: "${item['name']}" — ${item['reason']}\n';
-      }
-      if (stats.skippedDetails.length > 5) {
-        report += '  ... и ещё ${stats.skippedDetails.length - 5} записей\n';
+    // ---------- Отброшенные листы ----------
+    if (rejectedReasons.isNotEmpty) {
+      buf.writeln('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      buf.writeln('⚠️ Листы, которые НЕ будут импортированы:');
+      for (final r in rejectedReasons) {
+        buf.writeln('  • "${r.sheetName}" — ${r.reason}');
       }
     }
 
     return showDialog<bool>(
       context: context,
       barrierDismissible: false,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('Результат импорта'),
-          content: SingleChildScrollView(
-            child: Text(report, style: const TextStyle(fontSize: 14)),
+      builder: (ctx) => AlertDialog(
+        title: Text(dryRun ? 'Диагностика (нет данных)' : 'Результат импорта'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Text(buf.toString(), style: const TextStyle(fontSize: 13)),
           ),
-          actions: [
+        ),
+        actions: [
+          // Если ошибок больше 3, показываем кнопку "Детали"
+          if (totalErrors > 3)
             TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Отмена'),
+              onPressed: () => _showAllErrorsDialog(context, allStats),
+              child: Text('Все ошибки ($totalErrors)'),
             ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          if (!dryRun)
             ElevatedButton(
-              onPressed: () => Navigator.pop(context, true),
+              onPressed: () => Navigator.pop(ctx, true),
               child: const Text('Принять'),
             ),
-          ],
-        );
-      },
+        ],
+      ),
+    );
+  }
+  // ---- 6. Диалог со всеми ошибками ----
+  Future<void> _showAllErrorsDialog(
+      BuildContext context, Map<String, SheetStats> allStats) async {
+    final buf = StringBuffer();
+    
+    for (final e in allStats.entries) {
+      final s = e.value;
+      if (s.skippedDetails.isEmpty) continue;
+
+      buf.writeln('📄 Лист "${e.key}":');
+      for (final item in s.skippedDetails) {
+        buf.writeln('  • Строка ${item['row']}: "${item['name']}"');
+        buf.writeln('    Причина: ${item['reason']}');
+      }
+      buf.writeln();
+    }
+
+    return showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Все ошибки импорта'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Text(buf.toString(), style: const TextStyle(fontSize: 13)),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Закрыть'),
+          ),
+        ],
+      ),
     );
   }
 
-  // --- Вспомогательный метод для показа сообщений ---
-  void _showMessage(BuildContext context, String message, {bool isSuccess = false}) {
+
+  // ---- Утилиты ----
+  String _getFieldLabel(String field) {
+    switch (field) {
+      case 'name':  return 'Название';
+      case 'category':  return 'Категория';
+      case 'composition':  return 'Состав';
+      case 'manufacturer':  return 'Производитель';
+      case 'package':  return 'Упаковка';
+      case 'rate':  return 'Норма расхода';
+      case 'price':  return 'Цена';
+      case 'description': return 'Описание';
+      case 'cultures': return 'Культуры';
+      case 'diseases': return 'Болезни';
+      default:
+        return field;
+    }
+  }
+
+  void _showMessage(BuildContext context, String message,
+      {bool isSuccess = false}) {
+    if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
@@ -1212,30 +1562,307 @@ class SettingsScreen extends StatelessWidget {
     );
   }
 
-  // --- Очистка БД (уже была) ---
+  // ============================================================
+  // ВЫБОРОЧНОЕ ОБНОВЛЕНИЕ (ПО КОЛОНКАМ)
+  // ============================================================
+  Future<void> _importPartialUpdate(BuildContext context) async {
+    try {
+      final result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['xlsx', 'xls'],
+      );
+      if (result == null || result.isEmpty) return;
+
+      final bytes = await result.first.readAsBytes();
+      final excel = Excel.decodeBytes(bytes);
+      final sheetNames = excel.tables.keys.where((n) => !n.startsWith('_')).toList();
+      if (sheetNames.isEmpty) return;
+
+      final selectedSheets = await _showSheetSelectionDialog(context, sheetNames);
+      if (selectedSheets == null || selectedSheets.isEmpty) return;
+
+      // 1. Анализ листов
+      final List<Map<String, dynamic>> rowsToUpdate = [];
+      final Set<String> allFoundFields = {};
+      final List<String> rejectedSheets = [];
+
+      for (final sheetName in selectedSheets) {
+        final sheet = excel.tables[sheetName];
+        if (sheet == null) continue;
+
+        int headerIdx = -1;
+        for (int i = 0; i < sheet.rows.length && i < 50; i++) {
+          final row = sheet.rows[i];
+          if (row.isEmpty) continue;
+          bool hasName = false;
+          for (final c in row) {
+            final text = _safeCellText(c).toLowerCase();
+            if (text.contains('название') || text.contains('препарат') || text.contains('наименование')) {
+              hasName = true;
+              break;
+            }
+          }
+          if (hasName) {
+            headerIdx = i;
+            break;
+          }
+        }
+        
+        if (headerIdx == -1) {
+          rejectedSheets.add(sheetName);
+          continue;
+        }
+
+        final headerRow = sheet.rows[headerIdx];
+        final Map<String, int> colIndices = {};
+        
+        for (final entry in fieldKeywords.entries) {
+          final field = entry.key;
+          final keywords = entry.value;
+          for (int i = 0; i < headerRow.length; i++) {
+            final val = _safeCellText(headerRow[i]).toLowerCase();
+            if (val.isEmpty) continue;
+            for (final kw in keywords) {
+              if (val.contains(kw)) {
+                colIndices[field] = i;
+                if (field != 'name') allFoundFields.add(field);
+                break;
+              }
+            }
+          }
+        }
+
+        if (!colIndices.containsKey('name')) {
+          rejectedSheets.add(sheetName);
+          continue;
+        }
+
+        final dataRows = sheet.rows.sublist(headerIdx + 1);
+        for (final row in dataRows) {
+          if (row.isEmpty) continue;
+          final name = _safeCellText(row[colIndices['name']!]);
+          if (name.isEmpty) continue;
+          
+          rowsToUpdate.add({
+            'name': name,
+            'rowData': row,
+            'colIndices': Map<String, int>.from(colIndices),
+          });
+        }
+      }
+
+      // ПРОВЕРКА: Если нет колонок для обновления
+      if (allFoundFields.isEmpty) {
+        _showMessageDialog(
+          context, 
+          'Ошибка', 
+          'В файле не найдено колонок для обновления (кроме наименования).\n\nЛисты без колонки "Наименование": ${rejectedSheets.join(', ')}'
+        );
+        return;
+      }
+
+      // 2. Диалог выбора колонок
+      final selectedFields = await _showUpdateColumnsSelectionDialog(context, allFoundFields.toList());
+      if (selectedFields == null || selectedFields.isEmpty) {
+        _showMessage(context, 'Обновление отменено');
+        return;
+      }
+
+      // 3. Формируем данные для проверки (БЕЗ обновления БД)
+      int totalProcessed = 0;
+      int notFoundCount = 0;
+      final existingNames = await DatabaseHelper.instance.getExistingProductNames();
+      final Map<String, Map<String, dynamic>> updatesMap = {}; 
+
+      for (final item in rowsToUpdate) {
+        final String name = item['name'];
+        final List<dynamic> row = item['rowData'];
+        final Map<String, int> colIndices = item['colIndices'];
+
+        if (!existingNames.contains(name.trim().toLowerCase())) {
+          notFoundCount++;
+          continue;
+        }
+
+        final Map<String, dynamic> updateData = {};
+        for (final field in selectedFields) {
+          if (colIndices.containsKey(field)) {
+            final idx = colIndices[field]!;
+            final val = idx < row.length ? _safeCellText(row[idx]) : '';
+            
+            if (field == 'price') {
+              updateData['price'] = _parseNumericValue(val);
+            } else if (field == 'rate') {
+              updateData['consumption_rate'] = val.isNotEmpty ? val : null;
+            } else {
+              updateData[field] = val.isNotEmpty ? val : null;
+            }
+          }
+        }
+        
+        if (updateData.isNotEmpty) {
+          updatesMap[name] = updateData;
+          totalProcessed++;
+        }
+      }
+
+      if (updatesMap.isEmpty) {
+        _showMessage(context, 'Не найдено совпадений с текущей базой данных');
+        return;
+      }
+
+      // 4. ПОКАЗЫВАЕМ ИТОГОВЫЙ ОТЧЕТ ПЕРЕД ОБНОВЛЕНИЕМ
+      final confirmed = await _showPartialUpdateReportDialog(
+        context, 
+        totalProcessed, 
+        notFoundCount, 
+        selectedFields
+      );
+
+      // 5. ОБНОВЛЯЕМ ТОЛЬКО ЕСЛИ НАЖАТО "ПРИНЯТЬ"
+      if (confirmed == true) {
+        await DatabaseHelper.instance.batchUpdateProductsByField(updatesMap);
+        DatabaseHelper.dbUpdateTrigger.value++; // <-- ТРИГГЕР (Выборочное обновление)
+        _showMessage(
+          context, 
+          'Успешно обновлено $totalProcessed записей', 
+          isSuccess: true
+        );
+      } else {
+        _showMessage(context, 'Обновление отменено');
+      }
+
+    } catch (e, st) {
+      debugPrint('Partial update error: $e\n$st');
+      _showMessage(context, 'Ошибка обновления: $e');
+    }
+  }
+  
+  // Простой диалог для вывода ошибки (вместо SnackBar)
+  void _showMessageDialog(BuildContext context, String title, String content) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(content),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('ОК'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Диалог выбора колонок (без изменений)
+  Future<List<String>?> _showUpdateColumnsSelectionDialog(
+      BuildContext context, List<String> availableFields) async {
+    final Map<String, bool> selected = {for (final f in availableFields) f: true};
+
+    return showDialog<List<String>>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) => AlertDialog(
+          title: const Text('Что обновить?'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Выберите колонки, данные из которых нужно перезаписать в базе:'),
+              const SizedBox(height: 8),
+              ...availableFields.map((f) => CheckboxListTile(
+                title: Text(_getFieldLabel(f)),
+                value: selected[f] ?? false,
+                onChanged: (val) {
+                  setState(() => selected[f] = val ?? false);
+                },
+              )),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, null),
+              child: const Text('Отмена'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                final chosen = selected.entries.where((e) => e.value).map((e) => e.key).toList();
+                if (chosen.isEmpty) return;
+                Navigator.pop(ctx, chosen);
+              },
+              child: const Text('Далее'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Диалог итогового отчета перед обновлением
+  Future<bool?> _showPartialUpdateReportDialog(
+    BuildContext context,
+    int foundCount,
+    int notFoundCount,
+    List<String> selectedFields,
+  ) async {
+    final fieldsText = selectedFields.map((f) => _getFieldLabel(f)).join(', ');
+
+    return showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Результат проверки'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Колонки для обновления: $fieldsText\n'),
+            Text('✅ Найдено в БД и будет обновлено: $foundCount'),
+            Text('❌ Пропущено (нет в БД): $notFoundCount'),
+            const SizedBox(height: 16),
+            const Text('Применить изменения в базе данных?'),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Принять'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ============================================================
+  // ОЧИСТКА БД (без изменений)
+  // ============================================================
   Future<void> _clearDatabase(BuildContext context) async {
     final confirm = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (ctx) => AlertDialog(
         title: const Text('Подтверждение'),
         content: const Text('Вы уверены, что хотите удалить все данные?'),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context, false),
+            onPressed: () => Navigator.pop(ctx, false),
             child: const Text('Отмена'),
           ),
           TextButton(
-            onPressed: () => Navigator.pop(context, true),
+            onPressed: () => Navigator.pop(ctx, true),
             child: const Text('Удалить'),
           ),
         ],
       ),
     );
-
     if (confirm != true) return;
-
     try {
       await DatabaseHelper.instance.deleteAllProducts();
+      DatabaseHelper.dbUpdateTrigger.value++; // <-- ТРИГГЕР (Очистка БД)
       if (context.mounted) {
         _showMessage(context, 'База данных очищена', isSuccess: true);
       }
@@ -1246,23 +1873,158 @@ class SettingsScreen extends StatelessWidget {
     }
   }
 
-  // --- Интерфейс ---
+    // ============================================================
+  // ЭКСПОРТ В EXCEL
+  // ============================================================
+  Future<void> _exportToExcel(BuildContext context) async {
+    // 1. Получаем данные из БД
+    final products = await DatabaseHelper.instance.getAllProducts();
+    if (products.isEmpty) {
+      _showMessage(context, 'База данных пуста — нечего экспортировать');
+      return;
+    }
+
+    // Показываем индикатор загрузки
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 20),
+            Text('Генерация Excel-файла...'),
+          ],
+        ),
+      ),
+    );
+
+    try {
+      // 2. Создаем Excel-документ
+      final excel = Excel.createExcel();
+      final Sheet sheet = excel['Каталог'];
+      
+      if (excel.sheets.containsKey('Sheet1')) {
+        excel.delete('Sheet1');
+      }
+
+      // 3. Формируем заголовки
+      sheet.appendRow([
+        TextCellValue('Название'),
+        TextCellValue('Тип'),
+        TextCellValue('Действующие вещества'),
+        TextCellValue('Описание'),
+        TextCellValue('Норма расхода'),
+        TextCellValue('Фасовка'),
+        TextCellValue('Цена, руб.'),
+        TextCellValue('Производитель'),
+        TextCellValue('Культуры'),
+        TextCellValue('Болезни'),
+      ]);
+
+      // 4. Заполняем строки данными
+      for (final p in products) {
+        sheet.appendRow([
+          TextCellValue(p.name),
+          TextCellValue(p.category),
+          TextCellValue(p.composition ?? ''),
+          TextCellValue(p.description ?? ''),
+          TextCellValue(p.consumptionRate ?? ''),
+          TextCellValue(p.package ?? ''),
+          p.price != null ? DoubleCellValue(p.price!) : TextCellValue(''),
+          TextCellValue(p.manufacturer ?? ''),
+          TextCellValue(p.cultures.join(', ')), 
+          TextCellValue(p.diseases.join(', ')), 
+        ]);
+      }
+
+      // 5. Сохраняем в байты
+      final bytes = excel.save();
+      if (bytes == null) throw Exception('Не удалось сгенерировать файл');
+      
+      // Преобразуем List<int> в Uint8List (требование нового API file_picker)
+      final Uint8List uint8Bytes = Uint8List.fromList(bytes);
+
+      // Закрываем диалог загрузки, так как файл сгенерирован
+      if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
+
+      // 6. Формируем имя файла с текущей датой
+      final now = DateTime.now();
+      final dateStr = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+      final defaultFileName = 'catalog_export_$dateStr.xlsx';
+
+      // 7. Открываем нативный диалог сохранения файла и передаем байты
+      final Uri? outputUri = await FilePicker.saveFile(
+        dialogTitle: 'Сохранить базу данных',
+        fileName: defaultFileName,
+        bytes: uint8Bytes, // Передаем сами данные!
+        type: FileType.custom,
+        allowedExtensions: ['xlsx'],
+      );
+
+      // 8. Проверяем результат (если Uri не null, значит сохранение прошло успешно)
+      if (outputUri != null) {
+        if (context.mounted) {
+          _showMessage(context, 'Экспорт успешно завершен!\nФайл сохранен: $defaultFileName', isSuccess: true);
+        }
+      } else {
+        // Пользователь закрыл диалог выбора файла без сохранения
+        if (context.mounted) _showMessage(context, 'Сохранение отменено');
+      }
+
+    } catch (e, st) {
+      // Если произошла ошибка, закрываем диалог загрузки (если он еще открыт)
+      if (context.mounted) Navigator.of(context, rootNavigator: true).pop(); 
+      
+      debugPrint('Export error: $e\n$st');
+      if (context.mounted) {
+        _showMessage(context, 'Ошибка экспорта: $e');
+      }
+    }
+  }
+  // ============================================================
+  // UI
+  // ============================================================
   @override
   Widget build(BuildContext context) {
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          const Text(
-            'Настройки',
-            style: TextStyle(fontSize: 24),
-          ),
+          const Text('Настройки', style: TextStyle(fontSize: 24)),
           const SizedBox(height: 40),
           ElevatedButton.icon(
             onPressed: () => _importFromExcel(context),
             icon: const Icon(Icons.upload_file),
             label: const Text('Импортировать препараты из Excel'),
-            style: ElevatedButton.styleFrom(minimumSize: const Size(250, 50)),
+            style: ElevatedButton.styleFrom(
+              minimumSize: const Size(250, 50), 
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), // чтобы текст не прилипал
+              ),
+          ),
+          const SizedBox(height: 20),
+          ElevatedButton.icon(
+            onPressed: () => _importPartialUpdate(context),
+            icon: const Icon(Icons.update),
+            label: const Text('Выборочное обновление данных'),
+            style: ElevatedButton.styleFrom(
+              minimumSize: const Size(250, 50), 
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), // чтобы текст не прилипал
+              backgroundColor: Colors.blue.shade700,
+              foregroundColor: Colors.white,
+            ),
+          ),
+          const SizedBox(height: 20),
+          ElevatedButton.icon(
+            onPressed: () => _exportToExcel(context),
+            icon: const Icon(Icons.download),
+            label: const Text('Экспортировать базу в Excel'),
+            style: ElevatedButton.styleFrom(
+              minimumSize: const Size(250, 50), 
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), // чтобы текст не прилипал
+              backgroundColor: Colors.green.shade700,
+              foregroundColor: Colors.white,
+            ),
           ),
           const SizedBox(height: 20),
           ElevatedButton.icon(
@@ -1270,11 +2032,34 @@ class SettingsScreen extends StatelessWidget {
             icon: const Icon(Icons.delete_forever),
             label: const Text('Очистить базу данных'),
             style: ElevatedButton.styleFrom(
-              minimumSize: const Size(250, 50),
+              minimumSize: const Size(250, 50), 
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), // чтобы текст не прилипал
+              
               backgroundColor: Colors.red,
               foregroundColor: Colors.white,
             ),
           ),
+        
+          const SizedBox(height: 20),
+          ElevatedButton.icon(
+            onPressed: () async {
+              showDialog(context: context, barrierDismissible: false, builder: (ctx) => const AlertDialog(content: Row(children: [CircularProgressIndicator(), SizedBox(width: 20), Text('Очистка данных...')])));
+              await DatabaseHelper.instance.cleanDatabaseReferences();
+              if (context.mounted) {
+                Navigator.of(context, rootNavigator: true).pop();
+                _showMessage(context, 'Справочники культур и болезней очищены от мусора!', isSuccess: true);
+              }
+            },
+            icon: const Icon(Icons.cleaning_services),
+            label: const Text('Очистить справочники от мусора'),
+            style: ElevatedButton.styleFrom(
+              minimumSize: const Size(250, 50), 
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), // чтобы текст не прилипал
+              
+              backgroundColor: Colors.orange.shade800,
+              foregroundColor: Colors.white,
+            ),
+          ),  
         ],
       ),
     );

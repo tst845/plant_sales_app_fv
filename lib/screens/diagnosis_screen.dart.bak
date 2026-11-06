@@ -1,0 +1,410 @@
+import 'dart:math' as math;
+import 'dart:typed_data';
+import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
+import '../services/plant_model.dart';
+import '../services/filter_manager.dart';
+import '../main.dart'; 
+
+// Вспомогательный класс выносим наверх, вне класса состояния
+class TopPrediction {
+  final int index;
+  final double prob;
+  TopPrediction(this.index, this.prob);
+}
+
+class DiagnosisScreen extends StatefulWidget {
+  const DiagnosisScreen({super.key});
+
+  @override
+  State<DiagnosisScreen> createState() => _DiagnosisScreenState();
+}
+
+class _DiagnosisScreenState extends State<DiagnosisScreen> {
+  final ImagePicker _picker = ImagePicker();
+  Uint8List? _imageBytes;
+  bool _isProcessing = false;
+  Map<String, dynamic>? _result;
+  bool _showMask = true; // По умолчанию показываем маску
+
+  @override
+  void initState() {
+    super.initState();
+    _loadModel(); // <-- ЗАПУСКАЕМ ЗАГРУЗКУ ПРИ СТАРТЕ
+  }
+
+  Future<void> _loadModel() async {
+    // Показываем индикатор, что модели грузятся (опционально)
+    // ...
+    
+    final success = await PlantModel.instance.loadModels();
+    
+    if (!success && mounted) {
+      // Если загрузка упала - показываем ошибку
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Ошибка загрузки моделей'),
+          content: Text(PlantModel.instance.loadError ?? 'Неизвестная ошибка. Проверьте, что файлы .onnx лежат в assets/models/ и прописаны в pubspec.yaml.'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('ОК')),
+          ],
+        ),
+      );
+    }
+  }
+
+  Future<void> _pickImage(ImageSource source) async {
+    if (source == ImageSource.camera) {
+      final status = await Permission.camera.request();
+      if (status.isDenied) return;
+    }
+
+    final XFile? image = await _picker.pickImage(source: source);
+    if (image != null) {
+      final bytes = await image.readAsBytes();
+      setState(() {
+        _imageBytes = bytes;
+        _result = null;
+        _showMask = true;
+      });
+    }
+  }
+
+  Future<void> _runDiagnosis() async {
+    if (_imageBytes == null) return;
+    if (!PlantModel.instance.isLoaded) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Модели ещё загружаются...')));
+      return;
+    }
+
+    setState(() => _isProcessing = true);
+
+    try {
+      final result = await PlantModel.instance.predict(_imageBytes!);
+      setState(() {
+        _result = result;
+        _isProcessing = false;
+      });
+    } catch (e) {
+      setState(() => _isProcessing = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
+      }
+    }
+  }
+
+  void _resetImage() {
+    setState(() {
+      _imageBytes = null;
+      _result = null;
+      _showMask = true;
+    });
+  }
+
+  // === ЛОГИКА ПОДБОРА ПРЕПАРАТА ===
+  void _findPesticides() async {
+    if (_result == null) return;
+
+    final double speciesConf = _result!['species_conf'] ?? 0.0;
+    final double diseaseConf = _result!['disease_conf'] ?? 0.0;
+    final List<double> speciesProbs = List<double>.from(_result!['species_probs'] ?? []);
+    final List<double> diseaseProbs = List<double>.from(_result!['disease_probs'] ?? []);
+    
+    final int speciesIdx = _result!['species_idx'] ?? 10; // 10 - unknown_object
+    final int diseaseIdx = _result!['disease_idx'] ?? 26; // 26 - unknown
+
+    // 1. Полная неопределенность
+    if (speciesIdx == 10 && (diseaseIdx == 26 || diseaseIdx == 13)) {
+      _showWarningDialog('Модель не смогла распознать объекты на фото. Попробуйте сделать более четкий снимок.');
+      return;
+    }
+
+    // 2. Модель не уверена (Confidence < 0.9)
+    if (speciesConf < 0.9 || diseaseConf < 0.9) {
+      _showMultiChoiceDialog(speciesProbs, diseaseProbs);
+      return;
+    }
+
+    // 3. Модель уверена (Confidence >= 0.9)
+    Set<String> finalSpecies = {};
+    Set<String> finalDiseases = {};
+    String warningMsg = "";
+
+    if (speciesIdx == 10) {
+      warningMsg += "• Вид не распознан. В каталоге будут показаны все культуры.\n";
+    } else if (speciesIdx == 11) {
+       warningMsg += "• Неизвестное растение. В каталоге будут показаны все культуры.\n";
+    } else {
+      finalSpecies.add(PlantModel.instance.speciesRu[speciesIdx] ?? '');
+    }
+
+    if (diseaseIdx == 13 || diseaseIdx == 26) {
+      warningMsg += "• Растение здорово или болезнь не определена. Фильтр по болезням не установлен.\n";
+    } else {
+      finalDiseases.add(PlantModel.instance.diseaseRu[diseaseIdx] ?? '');
+    }
+
+    if (warningMsg.isNotEmpty) {
+      _showWarningDialog(warningMsg, onApply: () => _applyFilters(finalSpecies, finalDiseases));
+    } else {
+      _applyFilters(finalSpecies, finalDiseases);
+    }
+  }
+
+  // Этот метод передает данные в каталог и переключает вкладку
+  void _applyFilters(Set<String> species, Set<String> diseases) {
+    FilterManager.instance.applyNewFilters(species, diseases);
+    mainScreenTabNotifier.value = 1; // Переключаем на вкладку Каталога
+  }
+
+  void _showWarningDialog(String message, {VoidCallback? onApply}) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Внимание'),
+        content: Text(message),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+          if (onApply != null)
+            ElevatedButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                onApply();
+              },
+              child: const Text('Продолжить'),
+            ),
+        ],
+      ),
+    );
+  }
+
+  List<TopPrediction> _getTop3(List<double> probs) {
+    final list = List.generate(probs.length, (i) => TopPrediction(i, probs[i]));
+    list.sort((a, b) => b.prob.compareTo(a.prob));
+    return list.take(3).toList();
+  }
+
+  void _showMultiChoiceDialog(List<double> speciesProbs, List<double> diseaseProbs) {
+    final topSpecies = _getTop3(speciesProbs);
+    final topDiseases = _getTop3(diseaseProbs);
+
+    Set<int> selectedSpecies = {topSpecies[0].index};
+    Set<int> selectedDiseases = {topDiseases[0].index};
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setModalState) {
+          return AlertDialog(
+            title: const Text('Модель не уверена'),
+            content: SizedBox(
+              width: double.maxFinite,
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('Вид растения:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                    ...topSpecies.map((item) {
+                      final name = PlantModel.instance.speciesRu[item.index] ?? 'Неизвестно';
+                      return CheckboxListTile(
+                        title: Text('$name (${(item.prob * 100).toStringAsFixed(1)}%)'),
+                        value: selectedSpecies.contains(item.index),
+                        onChanged: (v) => setModalState(() {
+                          if (v == true) selectedSpecies.add(item.index);
+                          else selectedSpecies.remove(item.index);
+                        }),
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                      );
+                    }),
+                    
+                    const Divider(),
+                    const Text('Болезнь:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                    ...topDiseases.map((item) {
+                      final name = PlantModel.instance.diseaseRu[item.index] ?? 'Неизвестно';
+                      return CheckboxListTile(
+                        title: Text('$name (${(item.prob * 100).toStringAsFixed(1)}%)'),
+                        value: selectedDiseases.contains(item.index),
+                        onChanged: (v) => setModalState(() {
+                          if (v == true) selectedDiseases.add(item.index);
+                          else selectedDiseases.remove(item.index);
+                        }),
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                      );
+                    }),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Отмена'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  
+                  Set<String> finalSpecies = selectedSpecies
+                      .where((idx) => idx != 10 && idx != 11) 
+                      .map((idx) => PlantModel.instance.speciesRu[idx] ?? '')
+                      .toSet();
+
+                  Set<String> finalDiseases = selectedDiseases
+                      .where((idx) => idx != 13 && idx != 26) 
+                      .map((idx) => PlantModel.instance.diseaseRu[idx] ?? '')
+                      .toSet();
+
+                  _applyFilters(finalSpecies, finalDiseases);
+                },
+                child: const Text('Применить'),
+              ),
+            ],
+          );
+        }
+      ),
+    );
+  }
+
+  // === UI ===
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Диагностика растений'),
+        actions: [
+          if (_imageBytes != null)
+            IconButton(
+              icon: const Icon(Icons.delete_outline, color: Colors.red),
+              onPressed: _resetImage,
+              tooltip: 'Сбросить',
+            )
+        ],
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            // Контейнер с картинкой
+            Container(
+              height: 300,
+              width: double.infinity,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade200,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.grey.shade400),
+              ),
+              child: _imageBytes == null
+                  ? const Center(child: Text('Нет изображения'))
+                  : ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          // Оригинал
+                          Image.memory(_imageBytes!, fit: BoxFit.contain),
+                          // Гладкая маска (PNG)
+                          if (_result != null && _showMask)
+                            Image.memory(
+                              _result!['mask_overlay'], // Берем сгенерированную PNG маску
+                              fit: BoxFit.contain,
+                            ),
+                        ],
+                      ),
+                    ),
+            ),
+            
+            const SizedBox(height: 16),
+
+            // Переключатель Оригинал/Маска
+            if (_result != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: SegmentedButton<bool>(
+                  segments: const [
+                    ButtonSegment(value: false, label: Text('Оригинал'), icon: Icon(Icons.image)),
+                    ButtonSegment(value: true, label: Text('Маска'), icon: Icon(Icons.color_lens)),
+                  ],
+                  selected: {_showMask},
+                  onSelectionChanged: (Set<bool> newSelection) {
+                    setState(() => _showMask = newSelection.first);
+                  },
+                ),
+              ),
+
+            // Кнопки выбора фото
+            Wrap(
+              spacing: 16, // Отступ между кнопками по горизонтали
+              runSpacing: 12, // Отступ по вертикали (если перенесутся)
+              alignment: WrapAlignment.center, // Центрируем
+              children: [
+                ElevatedButton.icon(
+                  onPressed: () => _pickImage(ImageSource.camera),
+                  icon: const Icon(Icons.camera_alt),
+                  label: const Text('Камера'),
+                ),
+                ElevatedButton.icon(
+                  onPressed: () => _pickImage(ImageSource.gallery),
+                  icon: const Icon(Icons.photo_library),
+                  label: const Text('Галерея'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+
+            // Кнопка запуска анализа
+            if (_imageBytes != null && _result == null)
+              SizedBox(
+                width: double.infinity,
+                height: 50,
+                child: ElevatedButton.icon(
+                  onPressed: _isProcessing ? null : _runDiagnosis,
+                  icon: _isProcessing 
+                      ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2))
+                      : const Icon(Icons.play_arrow),
+                  label: Text(_isProcessing ? 'Анализ...' : 'Запустить диагностику'),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white),
+                ),
+              ),
+
+            // Блок результата
+            if (_result != null) ...[
+              const SizedBox(height: 24),
+              Card(
+                elevation: 4,
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Результат', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.green)),
+                      const Divider(),
+                      Text('Вид: ${_result!['species']}', style: const TextStyle(fontSize: 16)),
+                      const SizedBox(height: 8),
+                      Text('Болезнь: ${_result!['disease']}', style: const TextStyle(fontSize: 16)),
+                      const SizedBox(height: 16),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 50,
+                        child: ElevatedButton.icon(
+                          onPressed: _findPesticides,
+                          icon: const Icon(Icons.search),
+                          label: const Text('Подобрать препарат'),
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade700, foregroundColor: Colors.white),
+                        ),
+                      )
+                    ],
+                  ),
+                ),
+              ),
+            ]
+          ],
+        ),
+      ),
+    );
+  }
+}
