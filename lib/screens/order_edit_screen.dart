@@ -32,24 +32,39 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
   @override
   void initState() {
     super.initState();
-    final orderToEdit = widget.order ?? OrderManager.instance.activeOrder.value;
-
-    if (orderToEdit != null) {
+    
+    // Если мы редактируем существующий заказ (передали из списка)
+    if (widget.order != null) {
+      final orderToEdit = widget.order!;
       _clientCtrl.text = orderToEdit.clientName;
       _orderDate = orderToEdit.orderDate;
       _status = orderToEdit.status;
       _notesCtrl.text = orderToEdit.notes ?? '';
       _shipmentCtrl.text = '${_orderDate.day}.${_orderDate.month}.${_orderDate.year}';
-      
-      // Устанавливаем в менеджер
       OrderManager.instance.setActiveOrder(orderToEdit);
-    } else {
-      OrderManager.instance.startNewOrder();
-      _shipmentCtrl.text = '${_orderDate.day}.${_orderDate.month}.${_orderDate.year}';
+    } 
+    // Если создаем НОВЫЙ заказ
+    else {
+      final draft = OrderManager.instance.activeOrder.value;
+      
+      // Если есть сохраненный черновик (у него нет ID), загружаем его. 
+      if (draft != null && draft.id == null) {
+        _clientCtrl.text = draft.clientName;
+        _orderDate = draft.orderDate;
+        _status = draft.status;
+        _notesCtrl.text = draft.notes ?? '';
+        _shipmentCtrl.text = '${_orderDate.day}.${_orderDate.month}.${_orderDate.year}';
+      } else {
+        OrderManager.instance.startNewOrder();
+        _shipmentCtrl.text = '${_orderDate.day}.${_orderDate.month}.${_orderDate.year}';
+      }
     }
 
-    // Слушаем изменения в заказе (например, из калькулятора)
     OrderManager.instance.activeOrder.addListener(_onOrderUpdated);
+  }
+
+  void _onOrderUpdated() {
+    if (mounted) setState(() {});
   }
 
   @override
@@ -59,10 +74,6 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
     _shipmentCtrl.dispose();
     _notesCtrl.dispose();
     super.dispose();
-  }
-  
-  void _onOrderUpdated() {
-    if (mounted) setState(() {}); // Перерисовываем при обновлении из калькулятора
   }
 
   Future<void> _save() async {
@@ -239,7 +250,10 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
     OrderManager.instance.isSyncedWithCalculator.value = true;
     
     if (mounted) {
+      // 1. Переключаем вкладку (убедитесь, что индекс верный)
       mainScreenTabNotifier.value = 1; // Переход на вкладку калькулятора
+      // 2. Закрываем экран редактирования заказа, чтобы показать главный экран
+      Navigator.popUntil(context, (route) => route.isFirst); 
     }
   }
 
@@ -456,16 +470,16 @@ class _OrderItemCard extends StatefulWidget {
 }
 
 class _OrderItemCardState extends State<_OrderItemCard> {
-  late TextEditingController _areaCtrl;
+    late TextEditingController _areaCtrl;
   late TextEditingController _rateCtrl;
   
-  // Фокус-ноды для правильной работы курсора
   final FocusNode _areaFocus = FocusNode();
   final FocusNode _rateFocus = FocusNode();
 
   @override
   void initState() {
     super.initState();
+    // Инициализируем только контроллеры площади и нормы
     _areaCtrl = TextEditingController(text: widget.item.area.toString().replaceAll('.', ','));
     _rateCtrl = TextEditingController(text: widget.item.rate.toString().replaceAll('.', ','));
   }
@@ -473,7 +487,6 @@ class _OrderItemCardState extends State<_OrderItemCard> {
   @override
   void didUpdateWidget(covariant _OrderItemCard oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Обновляем контроллеры ТОЛЬКО если поле не в фокусе (чтобы курсор не прыгал)
     if (!_areaFocus.hasFocus) {
       _areaCtrl.text = widget.item.area.toString().replaceAll('.', ',');
     }

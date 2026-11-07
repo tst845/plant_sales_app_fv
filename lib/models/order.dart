@@ -40,16 +40,16 @@ class OrderItem {
   // Итоговая стоимость
   double get totalPrice => packagesCount * discountedPrice;
 
+
   factory OrderItem.fromMap(Map<String, dynamic> map) {
     return OrderItem(
       id: map['id'] as int?,
-      orderId: map['order_id'] as int?,
       productId: map['product_id'] as int?,
-      productName: map['product_name'] as String? ?? '',
-      basePrice: (map['base_price'] as num).toDouble(),
+      productName: map['product_name'] as String? ?? 'Без названия',
+      basePrice: (map['base_price'] as num?)?.toDouble() ?? 0.0,
       discountPercent: (map['discount_percent'] as num?)?.toDouble() ?? 0.0,
-      rate: (map['rate'] as num?)?.toDouble() ?? 1.0,
-      area: (map['area'] as num?)?.toDouble() ?? 1.0,
+      rate: (map['rate'] as num?)?.toDouble() ?? 1.0, // Если null, ставим 1
+      area: (map['area'] as num?)?.toDouble() ?? 1.0, // Если null, ставим 1
       packageVolume: (map['package_volume'] as num?)?.toDouble() ?? 1.0,
       packageUnit: map['package_unit'] as String? ?? 'ед.',
     );

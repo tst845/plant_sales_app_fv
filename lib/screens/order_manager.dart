@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import '../models/order.dart';
 import 'calculator_manager.dart';
 
-class OrderManager {
+class OrderManager extends ChangeNotifier { 
   static final OrderManager instance = OrderManager._internal();
   OrderManager._internal();
 
@@ -11,6 +11,8 @@ class OrderManager {
   
   // Флаг, включена ли синхронизация с калькулятором
   final ValueNotifier<bool> isSyncedWithCalculator = ValueNotifier<bool>(false);
+
+  
 
   void startNewOrder() {
     activeOrder.value = Order(
@@ -46,30 +48,5 @@ class OrderManager {
       items: newItems,
     );
   }
-  
-  // // Добавление списка OrderItem в активный заказ
-  // void addItemsToActiveOrder(List<OrderItem> newItems) {
-  //   final order = activeOrder.value;
-  //   if (order == null) return;
 
-  //   final List<OrderItem> updatedItems = List.from(order.items);
-
-  //   for (var newItem in newItems) {
-  //     final idx = updatedItems.indexWhere((o) => o.productId == newItem.productId);
-  //     if (idx != -1) {
-  //       updatedItems[idx] = newItem; // Обновляем
-  //     } else {
-  //       updatedItems.add(newItem); // Добавляем
-  //     }
-  //   }
-
-  //   activeOrder.value = Order(
-  //     id: order.id,
-  //     clientName: order.clientName,
-  //     orderDate: order.orderDate,
-  //     status: order.status,
-  //     notes: order.notes,
-  //     items: updatedItems,
-  //   );
-  // }
 }

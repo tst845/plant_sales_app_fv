@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/order.dart';
 import '../database/database_helper.dart';
 import 'order_edit_screen.dart';
+import 'order_manager.dart';
 
 class OrdersScreen extends StatefulWidget {
   const OrdersScreen({super.key});
@@ -18,12 +19,23 @@ class _OrdersScreenState extends State<OrdersScreen> {
   bool _sortAscending = true;
   // ВРЕМЕННЫЙ ФЛАГ ДЛЯ ДЕМО-ДАННЫХ
   // Когда заказы будут готовы, просто поменяйте на false
-  final bool _useDemoData = true; 
+  final bool _useDemoData = false; 
 
   @override
   void initState() {
     super.initState();
     _loadOrders();
+    // Слушаем изменения черновика
+    OrderManager.instance.activeOrder.addListener(_onDraftChanged);
+  }
+  @override
+  void dispose() {
+    OrderManager.instance.activeOrder.removeListener(_onDraftChanged);
+    super.dispose();
+  }
+
+  void _onDraftChanged() {
+    if (mounted) setState(() {}); // Перерисовываем экран при изменении черновика
   }
 
   Future<void> _loadOrders() async {
@@ -232,52 +244,74 @@ class _OrdersScreenState extends State<OrdersScreen> {
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : _orders.isEmpty
-              ? const Center(child: Text('Нет заказов.\nНажмите + чтобы создать.'))
-              : ListView.builder(
+          : ValueListenableBuilder<Order?>(
+              valueListenable: OrderManager.instance.activeOrder,
+              builder: (context, draftOrder, child) {
+                // Проверяем, есть ли черновик (у него нет ID)
+                final hasDraft = draftOrder != null && draftOrder.id == null;
+                
+                if (_orders.isEmpty && !hasDraft) {
+                  return const Center(child: Text('Нет заказов.\nНажмите + чтобы создать.'));
+                }
+
+                // Формируем итоговый список: сначала черновик (если есть), потом остальные
+                final displayList = [
+                  if (hasDraft) draftOrder,
+                  ..._sortedOrders,
+                ];
+
+                return ListView.builder(
                   padding: const EdgeInsets.all(8),
-                  itemCount: _sortedOrders.length,
+                  itemCount: displayList.length,
                   itemBuilder: (context, index) {
-                    final order = _sortedOrders[index];
+                    final order = displayList[index];
+                    final isDraft = order.id == null; // Проверка на черновик
                     final dateStr = '${order.orderDate.day}.${order.orderDate.month}.${order.orderDate.year}';
                     
                     return Card(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      child: ListTile(
-                        // Иконка и цвет меняются в зависимости от статуса
-                        leading: CircleAvatar(
-                          backgroundColor: _getStatusColor(order.status),
-                          child: Icon(_getStatusIcon(order.status), color: Colors.white),
-                        ),
-                        title: Text(order.clientName, style: const TextStyle(fontWeight: FontWeight.bold)),
-                        
-                        // Две строки без разделителя
-                        subtitle: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text('от $dateStr'),
-                            Text('Позиций: ${order.items.length}'),
-                          ],
-                        ),
-                        isThreeLine: true, // Разрешаем ListTile занимать 3 строки (заголовок + 2 строки сабтайтла)
-                        
-                        trailing: Text(
-                          '${order.totalAmount.toStringAsFixed(2)} ₽',
-                          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 16),
-                        ),
-                        onTap: () async {
-                          final res = await Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (context) => OrderEditScreen(order: order),
-                            ),
-                          );
-                          if (res == true) _loadOrders();
-                        },
+                margin: const EdgeInsets.only(bottom: 8),
+                color: isDraft ? Colors.blue.shade50 : null, // Подсветка черновика
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: isDraft ? BorderSide(color: Colors.blue.shade300, width: 1.5) : BorderSide.none,
+                ),
+                child: ListTile(
+                  leading: CircleAvatar(
+                    backgroundColor: isDraft ? Colors.blue : _getStatusColor(order.status),
+                    child: Icon(isDraft ? Icons.edit_document : _getStatusIcon(order.status), color: Colors.white),
+                  ),
+                  title: Text(
+                    isDraft ? 'Черновик (${order.clientName.isEmpty ? "Без имени" : order.clientName})' : order.clientName, 
+                    style: TextStyle(fontWeight: FontWeight.bold, color: isDraft ? Colors.blue.shade900 : null)
+                  ),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('от $dateStr'),
+                      Text('Позиций: ${order.items.length}'),
+                    ],
+                  ),
+                  isThreeLine: true,
+                  trailing: Text(
+                    '${order.totalAmount.toStringAsFixed(2)} ₽',
+                    style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 16),
+                  ),
+                  onTap: () async {
+                    final res = await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => OrderEditScreen(order: isDraft ? null : order),
                       ),
                     );
+                    // Если черновик сохранили (res == true) или он изменился, список перерисуется автоматически
+                    if (res == true) _loadOrders();
                   },
                 ),
+              );
+            },
+          );
+        },
+      ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () async {
           final res = await Navigator.push(

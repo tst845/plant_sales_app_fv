@@ -408,62 +408,74 @@ class DatabaseHelper {
   // CRUD ДЛЯ ЗАКАЗОВ
   // ==========================================
 
-  // СОЗДАНИЕ (Insert)
+    // --- СОХРАНЕНИЕ НОВОГО ЗАКАЗА ---
   Future<int> insertOrder(Order order) async {
-    final db = await database;
+    Database db = await database;
     return await db.transaction((txn) async {
-      // 1. Вставляем шапку заказа
-      final orderId = await txn.insert('orders', order.toMap());
+      // 1. Сохраняем шапку заказа
+      final orderId = await txn.insert('orders', {
+        'client_name': order.clientName,
+        'order_date': order.orderDate.toIso8601String(),
+        'status': order.status,
+        'notes': order.notes,
+        'total_amount': order.totalAmount,
+      });
       
-      // 2. Вставляем позиции
+      // 2. Сохраняем позиции
       for (var item in order.items) {
-        final itemMap = item.toMap();
-        itemMap['order_id'] = orderId; // Привязываем к созданному заказу
-        await txn.insert('order_items', itemMap);
+        await txn.insert('order_items', {
+          'order_id': orderId,
+          'product_id': item.productId,
+          'product_name': item.productName,
+          'base_price': item.basePrice,
+          'discount_percent': item.discountPercent,
+          'rate': item.rate,
+          'area': item.area,
+          'package_volume': item.packageVolume,
+          'package_unit': item.packageUnit,
+        });
       }
       return orderId;
     });
   }
 
-  // ОБНОВЛЕНИЕ (Update)
+  // --- ОБНОВЛЕНИЕ СУЩЕСТВУЮЩЕГО ЗАКАЗА ---
   Future<void> updateOrder(Order order) async {
-    final db = await database;
-    if (order.id == null) throw Exception('Невозможно обновить заказ без ID');
-    
+    Database db = await database;
     await db.transaction((txn) async {
       // 1. Обновляем шапку
-      await txn.update(
-        'orders',
-        order.toMap(),
-        where: 'id = ?',
-        whereArgs: [order.id],
-      );
+      await txn.update('orders', {
+        'client_name': order.clientName,
+        'order_date': order.orderDate.toIso8601String(),
+        'status': order.status,
+        'notes': order.notes,
+        'total_amount': order.totalAmount,
+      }, where: 'id = ?', whereArgs: [order.id]);
 
-      // 2. Удаляем все старые позиции этого заказа
-      await txn.delete(
-        'order_items',
-        where: 'order_id = ?',
-        whereArgs: [order.id],
-      );
-
-      // 3. Вставляем новые позиции
+      // 2. Удаляем старые позиции и записываем новые (самый надежный способ)
+      await txn.delete('order_items', where: 'order_id = ?', whereArgs: [order.id]);
       for (var item in order.items) {
-        final itemMap = item.toMap();
-        itemMap['order_id'] = order.id;
-        await txn.insert('order_items', itemMap);
+        await txn.insert('order_items', {
+          'order_id': order.id,
+          'product_id': item.productId,
+          'product_name': item.productName,
+          'base_price': item.basePrice,
+          'discount_percent': item.discountPercent,
+          'rate': item.rate,
+          'area': item.area,
+          'package_volume': item.packageVolume,
+          'package_unit': item.packageUnit,
+        });
       }
     });
   }
 
-  // УДАЛЕНИЕ (Delete)
-  Future<void> deleteOrder(int orderId) async {
-    final db = await database;
-    // Благодаря ON DELETE CASCADE, позиции (order_items) удалятся автоматически
-    await db.delete(
-      'orders',
-      where: 'id = ?',
-      whereArgs: [orderId],
-    );
+  // --- УДАЛЕНИЕ ЗАКАЗА ---
+  Future<int> deleteOrder(int id) async {
+    Database db = await database;
+    // Если в схеме БД настроен ON DELETE CASCADE для order_items, 
+    // то позиции удалятся автоматически. Если нет — удалите их вручную перед удалением шапки.
+    return await db.delete('orders', where: 'id = ?', whereArgs: [id]);
   }
 
   // ПОЛУЧЕНИЕ ВСЕХ ЗАКАЗОВ (Read)
