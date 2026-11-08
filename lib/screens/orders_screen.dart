@@ -244,19 +244,19 @@ class _OrdersScreenState extends State<OrdersScreen> {
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : ValueListenableBuilder<Order?>(
+          : ValueListenableBuilder(
               valueListenable: OrderManager.instance.activeOrder,
-              builder: (context, draftOrder, child) {
-                // Проверяем, есть ли черновик (у него нет ID)
-                final hasDraft = draftOrder != null && draftOrder.id == null;
-                
+              builder: (context, activeOrder, child) {
+                final hasDraft = activeOrder != null && activeOrder.id == null;
+
                 if (_orders.isEmpty && !hasDraft) {
-                  return const Center(child: Text('Нет заказов.\nНажмите + чтобы создать.'));
+                  return const Center(
+                    child: Text('Нет заказов.\nНажмите + чтобы создать.'),
+                  );
                 }
 
-                // Формируем итоговый список: сначала черновик (если есть), потом остальные
                 final displayList = [
-                  if (hasDraft) draftOrder,
+                  if (hasDraft) activeOrder,
                   ..._sortedOrders,
                 ];
 
@@ -265,53 +265,11 @@ class _OrdersScreenState extends State<OrdersScreen> {
                   itemCount: displayList.length,
                   itemBuilder: (context, index) {
                     final order = displayList[index];
-                    final isDraft = order.id == null; // Проверка на черновик
-                    final dateStr = '${order.orderDate.day}.${order.orderDate.month}.${order.orderDate.year}';
-                    
-                    return Card(
-                margin: const EdgeInsets.only(bottom: 8),
-                color: isDraft ? Colors.blue.shade50 : null, // Подсветка черновика
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  side: isDraft ? BorderSide(color: Colors.blue.shade300, width: 1.5) : BorderSide.none,
-                ),
-                child: ListTile(
-                  leading: CircleAvatar(
-                    backgroundColor: isDraft ? Colors.blue : _getStatusColor(order.status),
-                    child: Icon(isDraft ? Icons.edit_document : _getStatusIcon(order.status), color: Colors.white),
-                  ),
-                  title: Text(
-                    isDraft ? 'Черновик (${order.clientName.isEmpty ? "Без имени" : order.clientName})' : order.clientName, 
-                    style: TextStyle(fontWeight: FontWeight.bold, color: isDraft ? Colors.blue.shade900 : null)
-                  ),
-                  subtitle: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('от $dateStr'),
-                      Text('Позиций: ${order.items.length}'),
-                    ],
-                  ),
-                  isThreeLine: true,
-                  trailing: Text(
-                    '${order.totalAmount.toStringAsFixed(2)} ₽',
-                    style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 16),
-                  ),
-                  onTap: () async {
-                    final res = await Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => OrderEditScreen(order: isDraft ? null : order),
-                      ),
-                    );
-                    // Если черновик сохранили (res == true) или он изменился, список перерисуется автоматически
-                    if (res == true) _loadOrders();
+                    return _buildOrderCard(order, activeOrder);
                   },
-                ),
-              );
-            },
-          );
-        },
-      ),
+                );
+              },
+            ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () async {
           final res = await Navigator.push(
@@ -326,5 +284,143 @@ class _OrdersScreenState extends State<OrdersScreen> {
         foregroundColor: Colors.white,
       ),
     );
+  }
+
+  Widget _buildOrderCard(Order order, Order? activeOrder) {
+    final bool isDraft = order.id == null;
+    // Активным считается заказ, который сейчас редактируется (совпадает ID)
+    final bool isActive = activeOrder != null && activeOrder.id == order.id;
+    // Подсвечиваем черновик или активный заказ
+    final bool highlight = isDraft || isActive;
+
+    final dateStr =
+        '${order.orderDate.day}.${order.orderDate.month}.${order.orderDate.year}';
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      color: highlight ? Colors.blue.shade50 : null,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: highlight
+            ? BorderSide(color: Colors.blue.shade300, width: 1.5)
+            : BorderSide.none,
+      ),
+      child: ExpansionTile(
+        // Заголовок карточки
+        leading: CircleAvatar(
+          backgroundColor: isDraft ? Colors.blue : _getStatusColor(order.status),
+          child: Icon(
+            isDraft ? Icons.edit_document : _getStatusIcon(order.status),
+            color: Colors.white,
+          ),
+        ),
+        title: Text(
+          isDraft
+              ? 'Черновик (${order.clientName.isEmpty ? "Без имени" : order.clientName})'
+              : order.clientName,
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+            color: isDraft ? Colors.blue.shade900 : null,
+          ),
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('от $dateStr'),
+            Text('Позиций: ${order.items.length}'),
+          ],
+        ),
+        // Содержимое при раскрытии
+        children: [
+          const Divider(height: 1),
+          // Список позиций заказа
+          if (order.items.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(16.0),
+              child: Text('Заказ пуст'),
+            )
+          else
+            ...order.items.map((item) => ListTile(
+                  dense: true,
+                  title: Text(item.productName),
+                  subtitle: Text(
+                    'Норма: ${item.rate} | Площадь: ${item.area} га',
+                  ),
+                  trailing: Text(
+                    '${item.totalPrice.toStringAsFixed(2)} ₽',
+                    style: const TextStyle(fontWeight: FontWeight.w500),
+                  ),
+                )),
+          // Кнопки действий
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                // Кнопка удаления (доступна для черновика и для сохранённых)
+                IconButton(
+                  icon: const Icon(Icons.delete, color: Colors.red),
+                  tooltip: 'Удалить',
+                  onPressed: () => _confirmDeleteOrder(order),
+                ),
+                const SizedBox(width: 8),
+                // Кнопка редактирования
+                ElevatedButton.icon(
+                  icon: const Icon(Icons.edit),
+                  label: const Text('Редактировать'),
+                  onPressed: () async {
+                    // Устанавливаем заказ как активный, чтобы он подсветился
+                    OrderManager.instance.setActiveOrder(order);
+                    final res = await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => OrderEditScreen(order: isDraft ? null : order),
+                      ),
+                    );
+                    if (res == true) _loadOrders();
+                  },
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // Метод подтверждения удаления
+  Future<void> _confirmDeleteOrder(Order order) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Удаление заказа'),
+        content: Text(
+          order.id == null
+              ? 'Удалить черновик?'
+              : 'Вы уверены, что хотите удалить заказ №${order.id}?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Отмена'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Удалить', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    if (order.id == null) {
+      // Удаление черновика
+      OrderManager.instance.clearActiveOrder();
+    } else {
+      // Удаление сохранённого заказа
+      await DatabaseHelper.instance.deleteOrder(order.id!);
+    }
+    _loadOrders();
   }
 }

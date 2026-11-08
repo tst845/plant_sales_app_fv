@@ -26,38 +26,30 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
   DateTime _orderDate = DateTime.now();
   String _status = 'Новый';
 
-  // Геттер для быстрого доступа к текущим препаратам из менеджера
   List<OrderItem> get currentItems => OrderManager.instance.activeOrder.value?.items ?? [];
 
   @override
   void initState() {
     super.initState();
     
-    // Если мы редактируем существующий заказ (передали из списка)
+    // Инициализация активного заказа
     if (widget.order != null) {
-      final orderToEdit = widget.order!;
-      _clientCtrl.text = orderToEdit.clientName;
-      _orderDate = orderToEdit.orderDate;
-      _status = orderToEdit.status;
-      _notesCtrl.text = orderToEdit.notes ?? '';
-      _shipmentCtrl.text = '${_orderDate.day}.${_orderDate.month}.${_orderDate.year}';
-      OrderManager.instance.setActiveOrder(orderToEdit);
-    } 
-    // Если создаем НОВЫЙ заказ
-    else {
+      OrderManager.instance.setActiveOrder(widget.order!);
+    } else {
       final draft = OrderManager.instance.activeOrder.value;
-      
-      // Если есть сохраненный черновик (у него нет ID), загружаем его. 
-      if (draft != null && draft.id == null) {
-        _clientCtrl.text = draft.clientName;
-        _orderDate = draft.orderDate;
-        _status = draft.status;
-        _notesCtrl.text = draft.notes ?? '';
-        _shipmentCtrl.text = '${_orderDate.day}.${_orderDate.month}.${_orderDate.year}';
-      } else {
+      if (draft == null || draft.id != null) {
         OrderManager.instance.startNewOrder();
-        _shipmentCtrl.text = '${_orderDate.day}.${_orderDate.month}.${_orderDate.year}';
       }
+    }
+
+    // Заполнение полей
+    final order = OrderManager.instance.activeOrder.value;
+    if (order != null) {
+      _clientCtrl.text = order.clientName;
+      _orderDate = order.orderDate;
+      _status = order.status;
+      _notesCtrl.text = order.notes ?? '';
+      _shipmentCtrl.text = '${_orderDate.day}.${_orderDate.month}.${_orderDate.year}';
     }
 
     OrderManager.instance.activeOrder.addListener(_onOrderUpdated);
@@ -82,13 +74,15 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
       return;
     }
 
-    final newOrder = Order(
-      id: widget.order?.id ?? OrderManager.instance.activeOrder.value?.id,
+    final active = OrderManager.instance.activeOrder.value;
+    if (active == null) return;
+
+    final newOrder = active.copyWith(
       clientName: _clientCtrl.text.trim(),
       orderDate: _orderDate,
       status: _status,
       notes: _notesCtrl.text.trim().isEmpty ? null : _notesCtrl.text.trim(),
-      items: currentItems, // Берем данные напрямую из менеджера
+      items: currentItems,
     );
 
     try {
@@ -98,9 +92,10 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
         await DatabaseHelper.instance.updateOrder(newOrder);
       }
 
-      final wasSynced = OrderManager.instance.isSyncedWithCalculator.value;
       OrderManager.instance.clearActiveOrder();
-      if (wasSynced) CalculatorManager.instance.clearAll(); // Очищаем черновик
+      if (OrderManager.instance.isSyncedWithCalculator.value) {
+        CalculatorManager.instance.clearAll();
+      }
       
       if (mounted) Navigator.pop(context, true);
     } catch (e) {
@@ -129,7 +124,6 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
   }
 
   Future<void> _addFromCatalog() async {
-    // 1. Открываем каталог в режиме выбора. Он вернет List<Product>
     final List<Product>? selectedProducts = await Navigator.push(
       context,
       MaterialPageRoute(
@@ -143,15 +137,12 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
     final List<OrderItem> newList = List.from(currentList);
     final List<String> skippedNames = [];
 
-    // 2. Проходим по выбранным продуктам
     for (var p in selectedProducts) {
       final exists = currentList.any((item) => item.productId == p.id);
       
       if (exists) {
-        // Вариант А: Препарат уже есть, запоминаем имя для уведомления
         skippedNames.add(p.name);
       } else {
-        // Парсим норму расхода
         double rate = 1.0;
         if (p.consumptionRate != null && p.consumptionRate!.isNotEmpty) {
           final match = RegExp(r'(\d+[.,]?\d*)').firstMatch(p.consumptionRate!);
@@ -160,7 +151,6 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
           }
         }
 
-        // Парсим упаковку
         double packageVolume = 1.0;
         String packageUnit = 'ед.';
         if (p.package != null && p.package!.isNotEmpty) {
@@ -169,49 +159,36 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
             packageVolume = double.tryParse(matchVol.group(1)!.replaceAll(',', '.')) ?? 1.0;
           }
           final lower = p.package!.toLowerCase();
-          if (lower.contains('мл')) {
-            packageUnit = 'мл';
-          } else if (lower.contains('кг')) {
-            packageUnit = 'кг';
-          } else if (lower.contains('г')) {
-            packageUnit = 'г';
-          } else if (lower.contains('л')) {
-            packageUnit = 'л';
-          }
+          if (lower.contains('мл')) packageUnit = 'мл';
+          else if (lower.contains('кг')) packageUnit = 'кг';
+          else if (lower.contains('г')) packageUnit = 'г';
+          else if (lower.contains('л')) packageUnit = 'л';
         }
 
-        // Создаем новый OrderItem и добавляем
         newList.add(OrderItem(
           productId: p.id,
           productName: p.name,
           basePrice: p.price ?? 0.0,
           discountPercent: 0.0,
           rate: rate,
-          area: 1.0, // По умолчанию 1 га
+          area: 1.0,
           packageVolume: packageVolume,
           packageUnit: packageUnit,
         ));
       }
     }
 
-    // 3. Обновляем данные в менеджере
     if (newList.length > currentList.length) {
       OrderManager.instance.updateItems(newList);
-      
-      // Синхронизируем с калькулятором, если включено
       if (OrderManager.instance.isSyncedWithCalculator.value) {
         CalculatorManager.instance.syncWithOrderItems(newList);
       }
-      setState(() {}); // Перерисовываем экран
+      setState(() {});
     }
 
-    // 4. Выводим сообщение, если были пропущены дубликаты
     if (skippedNames.isNotEmpty && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Уже есть в заказе: ${skippedNames.join(", ")}'),
-          backgroundColor: Colors.orange,
-        ),
+        SnackBar(content: Text('Уже есть в заказе: ${skippedNames.join(", ")}'), backgroundColor: Colors.orange),
       );
     }
   }
@@ -236,7 +213,7 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
       OrderManager.instance.updateItems(mergedItems);
       CalculatorManager.instance.syncWithOrderItems(mergedItems);
       OrderManager.instance.isSyncedWithCalculator.value = true;
-      setState(() {}); // Обновляем UI
+      setState(() {});
     }
   }
 
@@ -250,9 +227,7 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
     OrderManager.instance.isSyncedWithCalculator.value = true;
     
     if (mounted) {
-      // 1. Переключаем вкладку (убедитесь, что индекс верный)
-      mainScreenTabNotifier.value = 1; // Переход на вкладку калькулятора
-      // 2. Закрываем экран редактирования заказа, чтобы показать главный экран
+      mainScreenTabNotifier.value = 1; 
       Navigator.popUntil(context, (route) => route.isFirst); 
     }
   }
@@ -303,7 +278,7 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
               ),
               ActionChip(
                 label: Text(_status, style: TextStyle(color: _getStatusColor(_status), fontWeight: FontWeight.bold, fontSize: 13)),
-                backgroundColor: _getStatusColor(_status).withOpacity(0.1),
+                backgroundColor: _getStatusColor(_status).withValues(alpha: 0.1),
                 side: BorderSide(color: _getStatusColor(_status)),
                 onPressed: _toggleStatus,
               ),
@@ -438,7 +413,7 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
   Widget _buildBottomPanel() {
     double total = 0;
     for (var item in currentItems) {
-      total += item.totalPrice; // Используем геттер из модели
+      total += item.totalPrice;
     }
     
     return Container(
@@ -470,7 +445,7 @@ class _OrderItemCard extends StatefulWidget {
 }
 
 class _OrderItemCardState extends State<_OrderItemCard> {
-    late TextEditingController _areaCtrl;
+  late TextEditingController _areaCtrl;
   late TextEditingController _rateCtrl;
   
   final FocusNode _areaFocus = FocusNode();
@@ -479,7 +454,6 @@ class _OrderItemCardState extends State<_OrderItemCard> {
   @override
   void initState() {
     super.initState();
-    // Инициализируем только контроллеры площади и нормы
     _areaCtrl = TextEditingController(text: widget.item.area.toString().replaceAll('.', ','));
     _rateCtrl = TextEditingController(text: widget.item.rate.toString().replaceAll('.', ','));
   }
@@ -548,18 +522,7 @@ class _OrderItemCardState extends State<_OrderItemCard> {
                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                     onChanged: (val) {
                       final newArea = double.tryParse(val.replaceAll(',', '.')) ?? 0.0;
-                      // Создаем НОВЫЙ объект, так как поля final
-                      widget.onChanged(OrderItem(
-                         id: widget.item.id,
-                         productId: widget.item.productId,
-                         productName: widget.item.productName,
-                         basePrice: widget.item.basePrice,
-                         discountPercent: widget.item.discountPercent,
-                         rate: widget.item.rate,
-                         area: newArea,
-                         packageVolume: widget.item.packageVolume,
-                         packageUnit: widget.item.packageUnit,
-                      ));
+                      widget.onChanged(widget.item.copyWith(area: newArea)); // ИСПОЛЬЗУЕМ copyWith
                     },
                   ),
                 ),
@@ -572,17 +535,7 @@ class _OrderItemCardState extends State<_OrderItemCard> {
                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                     onChanged: (val) {
                       final newRate = double.tryParse(val.replaceAll(',', '.')) ?? 0.0;
-                      widget.onChanged(OrderItem(
-                         id: widget.item.id,
-                         productId: widget.item.productId,
-                         productName: widget.item.productName,
-                         basePrice: widget.item.basePrice,
-                         discountPercent: widget.item.discountPercent,
-                         rate: newRate,
-                         area: widget.item.area,
-                         packageVolume: widget.item.packageVolume,
-                         packageUnit: widget.item.packageUnit,
-                      ));
+                      widget.onChanged(widget.item.copyWith(rate: newRate));
                     },
                   ),
                 ),

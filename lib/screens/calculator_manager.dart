@@ -84,9 +84,12 @@ class CalculatorManager {
   final ValueNotifier<List<CalcItem>> items = ValueNotifier<List<CalcItem>>([]);
   final ValueNotifier<bool> isAreaMode = ValueNotifier<bool>(false); // Переименовали в isAreaMode
 
-  bool addProduct(Product product) {
+ bool addProduct(Product product) {
     if (product.price == null) return false;
-    if (items.value.length >= 10) return false;
+    
+    // УВЕЛИЧИВАЕМ ЛИМИТ (или убираем вовсе)
+    if (items.value.length >= 50) return false; 
+    
     if (items.value.any((e) => e.productId == product.id)) return true;
 
     double extractedRate = 1.0;
@@ -143,14 +146,21 @@ class CalculatorManager {
 
   void syncWithOrderItems(List<OrderItem> orderItems) {
     List<CalcItem> newItems = orderItems.map((o) {
+      // ПЕРЕСЧИТЫВАЕМ СКИДКУ, чтобы калькулятор не терял её
+      final hasDiscount = o.discountPercent > 0;
+      final base = o.basePrice;
+      final finalP = hasDiscount ? (base * (1 - o.discountPercent / 100)) : null;
+
       return CalcItem(
         productId: o.productId ?? 0,
         name: o.productName,
-        basePrice: o.basePrice,
+        basePrice: base,
         packageStr: '${o.packageVolume} ${o.packageUnit}',
         rate: o.rate,
         area: o.area,
         percent: o.discountPercent,
+        rub: hasDiscount ? (base - finalP!) : null,
+        finalPrice: finalP,
       );
     }).toList();
     

@@ -68,6 +68,32 @@ class OrderItem {
       'package_unit': packageUnit,
     };
   }
+
+  OrderItem copyWith({
+    int? id,
+    int? orderId,
+    int? productId,
+    String? productName,
+    double? basePrice,
+    double? discountPercent,
+    double? rate,
+    double? area,
+    double? packageVolume,
+    String? packageUnit,
+  }) {
+    return OrderItem(
+      id: id ?? this.id,
+      orderId: orderId ?? this.orderId,
+      productId: productId ?? this.productId,
+      productName: productName ?? this.productName,
+      basePrice: basePrice ?? this.basePrice,
+      discountPercent: discountPercent ?? this.discountPercent,
+      rate: rate ?? this.rate,
+      area: area ?? this.area,
+      packageVolume: packageVolume ?? this.packageVolume,
+      packageUnit: packageUnit ?? this.packageUnit,
+    );
+  }
 }
 
 class Order {
@@ -110,4 +136,23 @@ class Order {
       'notes': notes,
     };
   }
+  // ДОБАВИТЬ ЭТОТ МЕТОД:
+  Order copyWith({
+    int? id,
+    String? clientName,
+    DateTime? orderDate,
+    String? status,
+    String? notes,
+    List<OrderItem>? items,
+  }) {
+    return Order(
+      id: id ?? this.id,
+      clientName: clientName ?? this.clientName,
+      orderDate: orderDate ?? this.orderDate,
+      status: status ?? this.status,
+      notes: notes ?? this.notes,
+      items: items ?? this.items,
+    );
+  }
+
 }

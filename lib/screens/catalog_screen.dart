@@ -9,6 +9,7 @@ import 'product_form_screen.dart';
 import 'calculator_manager.dart';
 import '../services/filter_manager.dart';
 import '../models/order.dart';
+import 'order_manager.dart';
 
 class CatalogFilter {
   Set<String> categories = {};
@@ -189,30 +190,13 @@ class _CatalogScreenState extends State<CatalogScreen> {
     }
   }
 
-    List<Product> get _filteredProducts {
-    // Если выбор подтвержден (Фаза 2), показываем ТОЛЬКО выбранные
+  List<Product> get _filteredProducts {
     if (_isSelectionConfirmed) {
       return _products.where((p) => _selectedIds.contains(p.id)).toList();
     }
 
-    // Обычный режим или Фаза 1 (активный выбор)
-    var result = _filter.apply(_products, _searchQuery);
-
-    // Если мы в режиме выбора (Фаза 1), поднимаем выбранные элементы наверх
-      if (_isSelectionMode) {
-      result.sort((a, b) {
-        final aSelected = _selectedIds.contains(a.id);
-        final bSelected = _selectedIds.contains(b.id);
-        
-        if (aSelected && !bSelected) return -1;
-        if (!aSelected && bSelected) return 1;
-        
-        // Если оба выбраны или оба не выбраны, сохраняем алфавитный порядок
-        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
-      });
-    }
-
-    return result;
+    // Возвращаем результат фильтрации без принудительной сортировки выбранных наверх
+    return _filter.apply(_products, _searchQuery);
   }
 
   void _hideKeyboard() => _searchFocusNode.unfocus();
@@ -668,32 +652,28 @@ class _CatalogScreenState extends State<CatalogScreen> {
 
   // --- Метод конвертации Product в OrderItem ---
   OrderItem _createOrderItem(Product p) {
-    // 1. Парсим норму расхода
     double rate = 1.0;
     if (p.consumptionRate != null && p.consumptionRate!.isNotEmpty) {
+      // Ищем первое число (например, из "0,7-1,0" возьмет 0.7)
       final match = RegExp(r'(\d+[.,]?\d*)').firstMatch(p.consumptionRate!);
       if (match != null) {
         rate = double.tryParse(match.group(1)!.replaceAll(',', '.')) ?? 1.0;
       }
     }
 
-    // 2. Парсим упаковку
     double packageVolume = 1.0;
     String packageUnit = 'ед.';
     if (p.package != null && p.package!.isNotEmpty) {
-      final matchVol = RegExp(r'(\d+([.,]\d+)?)').firstMatch(p.package!);
+      // Ищем число, за которым может идти пробел или сразу буква (например "10л" или "10 л")
+      final matchVol = RegExp(r'(\d+([.,]\d+)?)\s*([а-яА-Яa-zA-Z]*)').firstMatch(p.package!);
       if (matchVol != null) {
         packageVolume = double.tryParse(matchVol.group(1)!.replaceAll(',', '.')) ?? 1.0;
-      }
-      final lower = p.package!.toLowerCase();
-      if (lower.contains('мл')) {
-        packageUnit = 'мл';
-      } else if (lower.contains('кг')) {
-        packageUnit = 'кг';
-      } else if (lower.contains('г')) {
-        packageUnit = 'г';
-      } else if (lower.contains('л')) {
-        packageUnit = 'л';
+        final unitStr = (matchVol.group(3) ?? '').toLowerCase();
+        
+        if (unitStr.contains('мл')) packageUnit = 'мл';
+        else if (unitStr.contains('кг')) packageUnit = 'кг';
+        else if (unitStr.contains('г')) packageUnit = 'г';
+        else if (unitStr.contains('л')) packageUnit = 'л';
       }
     }
 
@@ -703,7 +683,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
       basePrice: p.price ?? 0.0,
       discountPercent: 0.0,
       rate: rate,
-      area: 1.0, // По умолчанию 1 га
+      area: 1.0,
       packageVolume: packageVolume,
       packageUnit: packageUnit,
     );
@@ -902,16 +882,29 @@ class _CatalogScreenState extends State<CatalogScreen> {
                     heroTag: 'calc_fab',
                     onPressed: () {
                       int added = 0;
+                      int failed = 0;
                       for (var id in _selectedIds) {
                         final p = _products.firstWhere((element) => element.id == id);
-                        if (CalculatorManager.instance.addProduct(p)) added++;
+                        if (p.price != null) {
+                          if (CalculatorManager.instance.addProduct(p)) {
+                            added++;
+                          }
+                        } else {
+                          failed++;
+                        }
                       }
                       setState(() {
                         _isSelectionMode = false;
                         _isSelectionConfirmed = false;
                         _selectedIds.clear();
                       });
-                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Добавлено в калькулятор: $added')));
+                      
+                      String msg = 'Добавлено в калькулятор: $added';
+                      if (failed > 0) msg += '. Пропущено (нет цены): $failed';
+                      
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(msg), backgroundColor: failed > 0 ? Colors.orange : Colors.green)
+                      );
                     },
                     icon: const Icon(Icons.calculate),
                     label: Text('В калькулятор (${_selectedIds.length})'),
@@ -922,11 +915,61 @@ class _CatalogScreenState extends State<CatalogScreen> {
                 ],
 
                 // Кнопка подтверждения (В заказ / Добавить)
+                                // Кнопка подтверждения (В заказ / Добавить)
                 FloatingActionButton.extended(
                   heroTag: 'order_fab',
                   onPressed: () {
                     final selectedProducts = _products.where((p) => _selectedIds.contains(p.id)).toList();
-                    Navigator.pop(context, selectedProducts); // Возвращаем List<Product>
+                    if (selectedProducts.isEmpty) return;
+
+                    if (widget.isOrderSelectionMode) {
+                      // Если каталог открыт ИЗ ОКНА РЕДАКТИРОВАНИЯ заказа — просто возвращаем список
+                      Navigator.pop(context, selectedProducts);
+                    } else {
+                      // Если каталог открыт как обычная вкладка — добавляем в глобальный активный заказ
+                      if (OrderManager.instance.activeOrder.value == null) {
+                        OrderManager.instance.startNewOrder();
+                      }
+
+                      final currentOrder = OrderManager.instance.activeOrder.value!;
+                      List<OrderItem> newItems = List.from(currentOrder.items);
+                      int addedCount = 0;
+
+                      for (var p in selectedProducts) {
+                        // Проверяем, нет ли уже такого препарата в заказе
+                        if (!newItems.any((item) => item.productId == p.id)) {
+                          newItems.add(_createOrderItem(p));
+                          addedCount++;
+                        }
+                      }
+
+                      // Обновляем заказ в менеджере
+                      OrderManager.instance.updateItems(newItems);
+                      
+                      // Если калькулятор синхронизирован, обновляем и его
+                      if (OrderManager.instance.isSyncedWithCalculator.value) {
+                        CalculatorManager.instance.syncWithOrderItems(newItems);
+                      }
+
+                      // Сбрасываем режим выбора
+                      setState(() {
+                        _isSelectionMode = false;
+                        _isSelectionConfirmed = false;
+                        _selectedIds.clear();
+                      });
+
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(addedCount > 0 
+                            ? 'Добавлено в заказ: $addedCount препаратов' 
+                            : 'Все выбранные препараты уже есть в заказе'),
+                          backgroundColor: addedCount > 0 ? Colors.green : Colors.orange,
+                        ),
+                      );
+
+                      // Опционально: переключить на вкладку заказов, чтобы пользователь сразу увидел результат
+                      // mainScreenTabNotifier.value = 2; // Раскомментируйте, если хотите автоматический переход
+                    }
                   },
                   icon: const Icon(Icons.check),
                   label: Text(widget.isOrderSelectionMode ? 'Добавить (${_selectedIds.length})' : 'В заказ (${_selectedIds.length})'),

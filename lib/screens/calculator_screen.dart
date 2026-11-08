@@ -37,14 +37,16 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
                 return Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 8.0),
                   child: ActionChip(
-                    avatar: const Icon(Icons.link, color: Colors.white, size: 16),
-                    label: const Text('Заказ', style: TextStyle(color: Colors.white)),
-                    backgroundColor: Colors.blue,
-                    onPressed: () {
-                      // Просто переводим на вкладку заказов
-                      mainScreenTabNotifier.value = 2; 
-                    },
-                  ),
+                          avatar: const Icon(Icons.link, color: Colors.white, size: 16),
+                          label: const Text('Заказ', style: TextStyle(color: Colors.white)),
+                          backgroundColor: Colors.blue,
+                          onPressed: () {
+                            // 1. СИНХРОНИЗИРУЕМ ДАННЫЕ ПЕРЕД ПЕРЕХОДОМ
+                            _syncCalcToOrder(); 
+                            // 2. Переводим на вкладку заказов
+                            mainScreenTabNotifier.value = 2; 
+                          },
+                        ),
                 );
               }
               return IconButton(
@@ -312,10 +314,13 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
   }
 
   void _syncCalcToOrder() {
+    if (!OrderManager.instance.isSyncedWithCalculator.value) return;
+    
     final calcItems = CalculatorManager.instance.items.value;
     final order = OrderManager.instance.activeOrder.value;
     if (order == null) return;
 
+    // Конвертируем CalcItem в OrderItem
     final List<OrderItem> newItems = calcItems.map((c) => OrderItem(
       productId: c.productId,
       productName: c.name,
@@ -327,6 +332,7 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
       packageUnit: c.packageUnit,
     )).toList();
 
+    // Отправляем в менеджер заказов
     OrderManager.instance.updateItems(newItems);
   }
 

@@ -1,52 +1,55 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import '../models/order.dart';
-import 'calculator_manager.dart';
+import 'order_manager.dart';
 
-class OrderManager extends ChangeNotifier { 
+enum ActiveOrderMode { none, draft, editing }
+
+class OrderManager {
   static final OrderManager instance = OrderManager._internal();
   OrderManager._internal();
 
-  // Текущий редактируемый заказ (черновик)
-  final ValueNotifier<Order?> activeOrder = ValueNotifier<Order?>(null);
-  
-  // Флаг, включена ли синхронизация с калькулятором
+  final ValueNotifier<Order?> activeOrder = ValueNotifier(null);
+  final ValueNotifier<ActiveOrderMode> activeMode = ValueNotifier(ActiveOrderMode.none);
   final ValueNotifier<bool> isSyncedWithCalculator = ValueNotifier<bool>(false);
 
-  
+  int? editingOrderId;
 
+  // Оставляем старый метод для совместимости с калькулятором
   void startNewOrder() {
     activeOrder.value = Order(
+      id: null,
       clientName: '',
       orderDate: DateTime.now(),
-      status: 'Новый',
       items: [],
+      status: 'Новый',
     );
-    isSyncedWithCalculator.value = false;
+    activeMode.value = ActiveOrderMode.draft;
+    editingOrderId = null;
   }
 
-  void setActiveOrder(Order? order) {
-    activeOrder.value = order;
-    isSyncedWithCalculator.value = false;
+  // Оставляем старый метод для совместимости со списком заказов
+  void setActiveOrder(Order order) {
+    if (order.id == null) {
+      activeOrder.value = order;
+      activeMode.value = ActiveOrderMode.draft;
+    } else {
+      activeOrder.value = order.copyWith();
+      activeMode.value = ActiveOrderMode.editing;
+      editingOrderId = order.id;
+    }
+  }
+
+  void updateItems(List<OrderItem> newItems) {
+    if (activeOrder.value != null) {
+      activeOrder.value = activeOrder.value!.copyWith(items: newItems);
+    }
   }
 
   void clearActiveOrder() {
     activeOrder.value = null;
+    activeMode.value = ActiveOrderMode.none;
     isSyncedWithCalculator.value = false;
+    editingOrderId = null;
   }
-
-  // Обновление списка препаратов (вызывается из калькулятора или заказа)
-  void updateItems(List<OrderItem> newItems) {
-    final current = activeOrder.value;
-    if (current == null) return;
-    
-    activeOrder.value = Order(
-      id: current.id,
-      clientName: current.clientName,
-      orderDate: current.orderDate,
-      status: current.status,
-      notes: current.notes,
-      items: newItems,
-    );
-  }
-
 }
