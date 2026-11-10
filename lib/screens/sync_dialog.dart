@@ -177,7 +177,6 @@ class _SyncDialogState extends State<SyncDialog> {
       discountPercent: c.percent ?? 0.0,
       rate: c.rate,
       area: c.area,
-      packageVolume: c.packageVolume,
       packageUnit: c.packageUnit,
     );
   }

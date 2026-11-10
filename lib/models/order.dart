@@ -5,12 +5,11 @@ class OrderItem {
   final int? orderId;
   final int? productId;
   final String productName;
-  final double basePrice; // Цена по прайсу
-  final double discountPercent; // Скидка %
-  final double rate; // Норма расхода (на га)
-  final double area; // Площадь (га)
-  final double packageVolume; // Объем одной упаковки (например, 5.0)
-  final String packageUnit; // Единица измерения (л, кг)
+  final double basePrice; 
+  final double discountPercent; 
+  final double rate; 
+  final double area; 
+  final String packageUnit; // Оставляем, чтобы знать 'л' или 'кг'
 
   OrderItem({
     this.id,
@@ -21,25 +20,12 @@ class OrderItem {
     this.discountPercent = 0.0,
     this.rate = 1.0,
     this.area = 1.0,
-    this.packageVolume = 1.0,
-    this.packageUnit = 'ед.',
+    this.packageUnit = 'ед.', // Оставляем
   });
 
-  // Стоимость со скидкой за 1 упаковку
   double get discountedPrice => basePrice * (1 - discountPercent / 100);
-
-  // Требуемый объем (Площадь * Норма)
   double get requiredVolume => area * rate;
-
-  // Количество упаковок (округление вверх)
-  int get packagesCount {
-    if (packageVolume <= 0) return 0;
-    return (requiredVolume / packageVolume).ceil();
-  }
-
-  // Итоговая стоимость
-  double get totalPrice => packagesCount * discountedPrice;
-
+  double get totalPrice => discountedPrice * requiredVolume;
 
   factory OrderItem.fromMap(Map<String, dynamic> map) {
     return OrderItem(
@@ -48,9 +34,8 @@ class OrderItem {
       productName: map['product_name'] as String? ?? 'Без названия',
       basePrice: (map['base_price'] as num?)?.toDouble() ?? 0.0,
       discountPercent: (map['discount_percent'] as num?)?.toDouble() ?? 0.0,
-      rate: (map['rate'] as num?)?.toDouble() ?? 1.0, // Если null, ставим 1
-      area: (map['area'] as num?)?.toDouble() ?? 1.0, // Если null, ставим 1
-      packageVolume: (map['package_volume'] as num?)?.toDouble() ?? 1.0,
+      rate: (map['rate'] as num?)?.toDouble() ?? 1.0,
+      area: (map['area'] as num?)?.toDouble() ?? 1.0,
       packageUnit: map['package_unit'] as String? ?? 'ед.',
     );
   }
@@ -64,8 +49,7 @@ class OrderItem {
       'discount_percent': discountPercent,
       'rate': rate,
       'area': area,
-      'package_volume': packageVolume,
-      'package_unit': packageUnit,
+      'package_unit': packageUnit, // Убрали package_volume
     };
   }
 
@@ -78,7 +62,6 @@ class OrderItem {
     double? discountPercent,
     double? rate,
     double? area,
-    double? packageVolume,
     String? packageUnit,
   }) {
     return OrderItem(
@@ -90,7 +73,6 @@ class OrderItem {
       discountPercent: discountPercent ?? this.discountPercent,
       rate: rate ?? this.rate,
       area: area ?? this.area,
-      packageVolume: packageVolume ?? this.packageVolume,
       packageUnit: packageUnit ?? this.packageUnit,
     );
   }

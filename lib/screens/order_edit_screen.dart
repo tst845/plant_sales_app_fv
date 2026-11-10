@@ -34,12 +34,16 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
     
     // Инициализация активного заказа
     if (widget.order != null) {
+      // Если передан конкретный заказ (например, из списка заказов) — открываем его
       OrderManager.instance.setActiveOrder(widget.order!);
     } else {
-      final draft = OrderManager.instance.activeOrder.value;
-      if (draft == null || draft.id != null) {
+      // Если заказ не передан (например, мы возвращаемся из калькулятора)
+      final current = OrderManager.instance.activeOrder.value;
+      if (current == null) {
+        // Создаем новый заказ ТОЛЬКО если вообще нет активного заказа
         OrderManager.instance.startNewOrder();
       }
+      // Если активный заказ есть, мы просто продолжаем его редактировать, ничего не сбрасывая!
     }
 
     // Заполнение полей
@@ -154,10 +158,6 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
         double packageVolume = 1.0;
         String packageUnit = 'ед.';
         if (p.package != null && p.package!.isNotEmpty) {
-          final matchVol = RegExp(r'(\d+([.,]\d+)?)').firstMatch(p.package!);
-          if (matchVol != null) {
-            packageVolume = double.tryParse(matchVol.group(1)!.replaceAll(',', '.')) ?? 1.0;
-          }
           final lower = p.package!.toLowerCase();
           if (lower.contains('мл')) packageUnit = 'мл';
           else if (lower.contains('кг')) packageUnit = 'кг';
@@ -172,8 +172,7 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
           discountPercent: 0.0,
           rate: rate,
           area: 1.0,
-          packageVolume: packageVolume,
-          packageUnit: packageUnit,
+          packageUnit: packageUnit, // Передаем только unit
         ));
       }
     }
@@ -287,6 +286,13 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
           TextFormField(
             controller: _clientCtrl,
             decoration: const InputDecoration(labelText: 'Имя или Название компании *', border: OutlineInputBorder(), prefixIcon: Icon(Icons.person)),
+            // ДОБАВИТЬ ЭТО:
+            onChanged: (val) {
+              final active = OrderManager.instance.activeOrder.value;
+              if (active != null) {
+                OrderManager.instance.activeOrder.value = active.copyWith(clientName: val);
+              }
+            },
           ),
           const SizedBox(height: 12),
           TextFormField(
@@ -304,6 +310,11 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
                 setState(() {
                   _orderDate = date;
                   _shipmentCtrl.text = '${date.day}.${date.month}.${date.year}';
+                  // ДОБАВИТЬ ЭТО:
+                  final active = OrderManager.instance.activeOrder.value;
+                  if (active != null) {
+                    OrderManager.instance.activeOrder.value = active.copyWith(orderDate: date);
+                  }
                 });
               }
             },
@@ -313,8 +324,14 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
             controller: _notesCtrl,
             maxLines: 3,
             decoration: const InputDecoration(labelText: 'Примечание', border: OutlineInputBorder(), alignLabelWithHint: true),
+            // ДОБАВИТЬ ЭТО:
+            onChanged: (val) {
+              final active = OrderManager.instance.activeOrder.value;
+              if (active != null) {
+                OrderManager.instance.activeOrder.value = active.copyWith(notes: val.isEmpty ? null : val);
+              }
+            },
           ),
-          
           const SizedBox(height: 24),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -450,12 +467,15 @@ class _OrderItemCardState extends State<_OrderItemCard> {
   
   final FocusNode _areaFocus = FocusNode();
   final FocusNode _rateFocus = FocusNode();
+  late TextEditingController _discountCtrl;
+  final FocusNode _discountFocus = FocusNode();
 
   @override
   void initState() {
     super.initState();
     _areaCtrl = TextEditingController(text: widget.item.area.toString().replaceAll('.', ','));
     _rateCtrl = TextEditingController(text: widget.item.rate.toString().replaceAll('.', ','));
+    _discountCtrl = TextEditingController(text: widget.item.discountPercent.toString().replaceAll('.', ','));
   }
   
   @override
@@ -467,6 +487,9 @@ class _OrderItemCardState extends State<_OrderItemCard> {
     if (!_rateFocus.hasFocus) {
       _rateCtrl.text = widget.item.rate.toString().replaceAll('.', ',');
     }
+    if (!_discountFocus.hasFocus) {
+      _discountCtrl.text = widget.item.discountPercent.toString().replaceAll('.', ',');
+    }
   }
 
   @override
@@ -475,6 +498,8 @@ class _OrderItemCardState extends State<_OrderItemCard> {
     _rateCtrl.dispose();
     _areaFocus.dispose();
     _rateFocus.dispose();
+    _discountCtrl.dispose();
+    _discountFocus.dispose();
     super.dispose();
   }
 
@@ -482,7 +507,7 @@ class _OrderItemCardState extends State<_OrderItemCard> {
   Widget build(BuildContext context) {
     final double discountedPrice = widget.item.discountedPrice;
     final double requiredVolume = widget.item.requiredVolume;
-    final int packagesCount = widget.item.packagesCount;
+    // final int packagesCount = widget.item.packagesCount;
     final double totalCost = widget.item.totalPrice;
 
     return Card(
@@ -542,6 +567,25 @@ class _OrderItemCardState extends State<_OrderItemCard> {
               ],
             ),
             const SizedBox(height: 12),
+            // НОВАЯ СТРОКА ДЛЯ СКИДКИ
+            Row(
+              children: [
+                Expanded(
+                  flex: 1,
+                  child: TextFormField(
+                    controller: _discountCtrl,
+                    focusNode: _discountFocus,
+                    decoration: const InputDecoration(labelText: 'Скидка, %', isDense: true, border: OutlineInputBorder()),
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    onChanged: (val) {
+                      final newDiscount = double.tryParse(val.replaceAll(',', '.')) ?? 0.0;
+                      widget.onChanged(widget.item.copyWith(discountPercent: newDiscount));
+                    },
+                  ),
+                ),
+                const Spacer(flex: 2), // Занимает пустое место справа
+              ],
+            ),
             Container(
               padding: const EdgeInsets.all(8),
               decoration: BoxDecoration(color: Colors.grey.shade50, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.grey.shade300)),
@@ -553,8 +597,7 @@ class _OrderItemCardState extends State<_OrderItemCard> {
                     children: [
                       Text('Требуется:', style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
                       Text('${requiredVolume.toStringAsFixed(2)} ${widget.item.packageUnit}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                      Text('($packagesCount упак.)', style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                    ],
+                      ],
                   ),
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.end,

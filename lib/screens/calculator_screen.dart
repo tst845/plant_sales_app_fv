@@ -1,17 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'calculator_manager.dart';
-import 'package:file_picker/file_picker.dart';
-import 'package:excel/excel.dart' hide Border;
-import 'dart:typed_data';
-import '../models/product.dart';
-import '../database/database_helper.dart';
 import '../main.dart';
 import '../models/order.dart';
 import 'order_manager.dart';
-import 'order_edit_screen.dart';
 import 'sync_dialog.dart';
-
+import 'order_edit_screen.dart';
 
 class CalculatorScreen extends StatefulWidget {
   const CalculatorScreen({super.key});
@@ -20,7 +14,6 @@ class CalculatorScreen extends StatefulWidget {
 }
 
 class _CalculatorScreenState extends State<CalculatorScreen> {
-  // const CalculatorScreen({super.key});
   bool _isOrderMode = false;
 
   @override
@@ -37,16 +30,20 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
                 return Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 8.0),
                   child: ActionChip(
-                          avatar: const Icon(Icons.link, color: Colors.white, size: 16),
-                          label: const Text('Заказ', style: TextStyle(color: Colors.white)),
-                          backgroundColor: Colors.blue,
-                          onPressed: () {
-                            // 1. СИНХРОНИЗИРУЕМ ДАННЫЕ ПЕРЕД ПЕРЕХОДОМ
-                            _syncCalcToOrder(); 
-                            // 2. Переводим на вкладку заказов
-                            mainScreenTabNotifier.value = 2; 
-                          },
-                        ),
+                    avatar: const Icon(Icons.link, color: Colors.white, size: 16),
+                    label: const Text('Заказ', style: TextStyle(color: Colors.white)),
+                    backgroundColor: Colors.blue,
+                    onPressed: () {
+                      _syncCalcToOrder(); 
+                      mainScreenTabNotifier.value = 2; 
+                      
+                      // --- ДОБАВИТЬ ПЕРЕХОД ---
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (context) => const OrderEditScreen()),
+                      );
+                    },
+                  ),
                 );
               }
               return IconButton(
@@ -57,15 +54,6 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
                 tooltip: 'В заказ',
                 onPressed: () => setState(() => _isOrderMode = !_isOrderMode),
               );
-            },
-          ),
-
-          IconButton(
-            icon: const Icon(Icons.download, color: Colors.green),
-            tooltip: 'Экспорт в Excel',
-            onPressed: () async {
-              // (Код экспорта оставляем без изменений)
-              // ... 
             },
           ),
           IconButton(
@@ -97,33 +85,6 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
       ),
       body: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12.0, horizontal: 16),
-            child: ValueListenableBuilder<bool>(
-              valueListenable: CalculatorManager.instance.isAreaMode,
-              builder: (context, isArea, child) {
-                return SegmentedButton<bool>(
-                  segments: [
-                    const ButtonSegment(
-                      value: false, 
-                      label: Text('За упаковку', style: TextStyle(fontSize: 13)), 
-                      icon: Icon(Icons.inventory_2, size: 18)
-                    ),
-                    ButtonSegment(
-                      value: true, 
-                      label: const Text('На площадь', style: TextStyle(fontSize: 13)), 
-                      icon: const Icon(Icons.grid_4x4, size: 18) // Иконка поля/сетки
-                    ),
-                  ],
-                  selected: {isArea},
-                  onSelectionChanged: (Set<bool> newSelection) {
-                    CalculatorManager.instance.toggleMode(newSelection.first);
-                  },
-                );
-              },
-            ),
-          ),
-
           Expanded(
             child: ValueListenableBuilder<List<CalcItem>>(
               valueListenable: CalculatorManager.instance.items,
@@ -132,44 +93,26 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
                   return const Center(child: Text('Список пуст.\nДобавьте препараты из каталога.', textAlign: TextAlign.center));
                 }
 
-                return ValueListenableBuilder<bool>(
-                  valueListenable: CalculatorManager.instance.isAreaMode,
-                  builder: (context, isArea, child) {
-                    double totalL = 0;
-                    double totalKg = 0;
-                    double totalCost = 0;
+                double totalCost = 0;
+                for (var item in items) {
+                  totalCost += item.totalCost;
+                }
 
-                    for (var item in items) {
-                      if (isArea) {
-                        // Считаем расход отдельно для Л и Кг
-                        final vol = item.requiredVolume;
-                        if (item.packageUnit == 'л') totalL += vol;
-                        if (item.packageUnit == 'кг') totalKg += vol;
-                        
-                        totalCost += item.totalCost;
-                      } else {
-                        totalCost += item.finalPrice ?? item.basePrice;
-                      }
-                    }
-
-                    return Column(
-                      children: [
-                        Expanded(
-                          child: ListView.builder(
-                            itemCount: items.length,
-                            itemBuilder: (context, index) {
-                              return _CalculatorItemCard(
-                                key: ValueKey(items[index].productId), 
-                                item: items[index],
-                                isAreaMode: isArea,
-                              );
-                            },
-                          ),
-                        ),
-                        _buildTotalPanel(totalL, totalKg, totalCost, isArea),
-                      ],
-                    );
-                  },
+                return Column(
+                  children: [
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: items.length,
+                        itemBuilder: (context, index) {
+                          return _CalculatorItemCard(
+                            key: ValueKey(items[index].productId), 
+                            item: items[index],
+                          );
+                        },
+                      ),
+                    ),
+                    _buildTotalPanel(totalCost),
+                  ],
                 );
               },
             ),
@@ -189,15 +132,7 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
                 backgroundColor: Colors.green,
                 foregroundColor: Colors.white,
               ),
-              const SizedBox(height: 12),
-              FloatingActionButton.extended(
-                heroTag: 'active_order',
-                onPressed: () => _transferToOrder(context, isNew: false),
-                icon: const Icon(Icons.receipt_long),
-                label: const Text('В активный заказ'),
-                backgroundColor: Colors.blue,
-                foregroundColor: Colors.white,
-              ),
+              
               const SizedBox(height: 12),
               FloatingActionButton(
                 heroTag: 'cancel',
@@ -207,46 +142,23 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
             ],
           )
         : null,
-    
-    
     );
   }
 
-  Widget _buildTotalPanel(double totalL, double totalKg, double totalCost, bool isArea) {
+  Widget _buildTotalPanel(double totalCost) {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.grey.shade100,
         border: const Border(top: BorderSide(color: Colors.grey, width: 1)),
       ),
-      child: Column(
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          if (isArea && (totalL > 0 || totalKg > 0)) ...[
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text('Общий расход:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                Text(
-                  [
-                    if (totalL > 0) '${totalL.toStringAsFixed(2)} л',
-                    if (totalKg > 0) '${totalKg.toStringAsFixed(2)} кг'
-                  ].join(', '),
-                  style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.red, fontSize: 14),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            const Divider(),
-          ],
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text('Итого к оплате:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-              Text(
-                '${totalCost.toStringAsFixed(2)} ₽',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 20, color: Colors.green.shade700),
-              ),
-            ],
+          const Text('Итого к оплате:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+          Text(
+            '${totalCost.toStringAsFixed(2)} ₽',
+            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 20, color: Colors.green.shade700),
           ),
         ],
       ),
@@ -283,17 +195,21 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
         discountPercent: c.percent ?? 0.0,
         rate: c.rate,
         area: c.area,
-        packageVolume: c.packageVolume,
+        // packageVolume: 1.0,
         packageUnit: c.packageUnit,
       )).toList();
       
       OrderManager.instance.updateItems(newItems);
       CalculatorManager.instance.syncWithOrderItems(newItems);
       
-      mainScreenTabNotifier.value = 2; // Заказы
+      mainScreenTabNotifier.value = 2;
       setState(() => _isOrderMode = false);
+      // --- ДОБАВИТЬ ПЕРЕХОД ---
+      Navigator.push(
+        context,
+        MaterialPageRoute(builder: (context) => const OrderEditScreen()),
+      );
     } else {
-      // Синхронизация с активным заказом
       final order = OrderManager.instance.activeOrder.value;
       if (order == null) return;
 
@@ -307,8 +223,13 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
         OrderManager.instance.updateItems(mergedItems);
         CalculatorManager.instance.syncWithOrderItems(mergedItems);
         OrderManager.instance.isSyncedWithCalculator.value = true;
-        mainScreenTabNotifier.value = 2; // Заказы
+        mainScreenTabNotifier.value = 2;
         setState(() => _isOrderMode = false);
+        // --- ДОБАВИТЬ ПЕРЕХОД ---
+        Navigator.push(
+          context,
+          MaterialPageRoute(builder: (context) => const OrderEditScreen()),
+        );
       }
     }
   }
@@ -320,7 +241,6 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     final order = OrderManager.instance.activeOrder.value;
     if (order == null) return;
 
-    // Конвертируем CalcItem в OrderItem
     final List<OrderItem> newItems = calcItems.map((c) => OrderItem(
       productId: c.productId,
       productName: c.name,
@@ -328,38 +248,26 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
       discountPercent: c.percent ?? 0.0,
       rate: c.rate,
       area: c.area,
-      packageVolume: c.packageVolume,
+      // packageVolume: 1.0,
       packageUnit: c.packageUnit,
     )).toList();
 
-    // Отправляем в менеджер заказов
     OrderManager.instance.updateItems(newItems);
   }
-
 }
 
 class _CalculatorItemCard extends StatefulWidget {
   final CalcItem item;
-  final bool isAreaMode;
 
-  const _CalculatorItemCard({super.key, required this.item, required this.isAreaMode});
+  const _CalculatorItemCard({super.key, required this.item});
 
   @override
   State<_CalculatorItemCard> createState() => _CalculatorItemCardState();
 }
 
 class _CalculatorItemCardState extends State<_CalculatorItemCard> {
-  late TextEditingController _percentCtrl;
-  late TextEditingController _rubCtrl;
-  late TextEditingController _finalCtrl;
-  late TextEditingController _rateCtrl;
-  late TextEditingController _areaCtrl;
-
-  final FocusNode _percentFocus = FocusNode();
-  final FocusNode _rubFocus = FocusNode();
-  final FocusNode _finalFocus = FocusNode();
-  final FocusNode _rateFocus = FocusNode();
-  final FocusNode _areaFocus = FocusNode();
+  late TextEditingController _percentCtrl, _rubCtrl, _finalCtrl, _rateCtrl, _areaCtrl;
+  final FocusNode _percentFocus = FocusNode(), _rubFocus = FocusNode(), _finalFocus = FocusNode(), _rateFocus = FocusNode(), _areaFocus = FocusNode();
 
   @override
   void initState() {
@@ -398,72 +306,82 @@ class _CalculatorItemCardState extends State<_CalculatorItemCard> {
     super.dispose();
   }
 
+    @override
+    Widget build(BuildContext context) {
+      final unit = widget.item.packageUnit;
+      final base = widget.item.basePrice;
+      final pricePerHaBase = base * widget.item.rate;
 
-  @override
-  Widget build(BuildContext context) {
-    final effectiveBase = widget.item.getEffectiveBasePrice(widget.isAreaMode);
-    final secondaryBase = widget.item.basePrice * widget.item.rate;
+      // Проверяем, есть ли скидка, чтобы показать расчет за Га
+      final hasDiscount = widget.item.percent != null && widget.item.percent! > 0;
+      final finalUnitPrice = widget.item.finalPrice ?? base;
+      final pricePerHaFinal = finalUnitPrice * widget.item.rate;
 
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // --- СТРОКА 1: Название, Базовая цена, Крестик ---
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    widget.item.name,
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                  ),
-                ),
-                Text(
-                  '${widget.item.basePrice.toStringAsFixed(2)} ₽', // Цена за упаковку без скидки
-                  style: TextStyle(color: Colors.blueGrey.shade700, fontSize: 14, fontWeight: FontWeight.w600),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.close, color: Colors.red),
-                  onPressed: () => CalculatorManager.instance.removeItem(widget.item.productId),
-                  padding: EdgeInsets.zero, constraints: const BoxConstraints(), visualDensity: VisualDensity.compact,
-                ),
-              ],
-            ),
-
-            // --- СТРОКА 2: Скидка, Цена со скидкой, Цена за Га ---
-            Row(
-              children: [
-                if (widget.item.percent != null && widget.item.percent! > 0)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8.0),
+      return Card(
+        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // СТРОКА 1: Название и Крестик (удалить)
+              Row(
+                children: [
+                  Expanded(
                     child: Text(
-                      'Скидка ${widget.item.percent!.toStringAsFixed(1)}%',
-                      style: const TextStyle(color: Colors.red, fontSize: 13, fontWeight: FontWeight.normal),
+                      widget.item.name,
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                     ),
                   ),
-                Text(
-                  '~ ${effectiveBase.toStringAsFixed(2)} ₽', // Цена со скидкой
-                  style: TextStyle(
-                    color: Colors.green.shade700,
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                if (widget.isAreaMode) ...[
-                  const SizedBox(width: 8),
-                  Text(
-                    '(${secondaryBase.toStringAsFixed(2)} ₽/га)', // Цена за Га
-                    style: TextStyle(color: Colors.orange.shade800, fontSize: 13),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.red),
+                    onPressed: () => CalculatorManager.instance.removeItem(widget.item.productId),
+                    padding: EdgeInsets.zero, constraints: const BoxConstraints(), visualDensity: VisualDensity.compact,
                   ),
                 ],
-              ],
-            ),
+              ),
 
-            // --- СТРОКА 3: Поля ввода (Площадь и Норма) ---
-            if (widget.isAreaMode) ...[
+              // СТРОКА 2: Базовая цена и Кнопка сброса
+              Row(
+                children: [
+                  Text(
+                    '${base.toStringAsFixed(2)} ₽/$unit',
+                    style: TextStyle(color: Colors.blueGrey.shade700, fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.refresh, color: Colors.blueGrey),
+                    tooltip: 'Сбросить',
+                    onPressed: () => CalculatorManager.instance.resetItem(widget.item.productId),
+                    padding: EdgeInsets.zero, constraints: const BoxConstraints(), visualDensity: VisualDensity.compact,
+                  ),
+                ],
+              ),
+
+              // СТРОКА 3: Цена за га (с учетом скидки)
+              Text(
+                hasDiscount
+                    ? 'Цена за га: ${pricePerHaBase.toStringAsFixed(2)} ₽ ~ ${pricePerHaFinal.toStringAsFixed(2)} ₽'
+                    : 'Цена за га: ${pricePerHaBase.toStringAsFixed(2)} ₽',
+                style: TextStyle(color: Colors.orange.shade800, fontSize: 13),
+              ),
+
               const SizedBox(height: 12),
+
+              // СТРОКА 4: Скидка (%, Руб, Итого) - без кнопки сброса
+              Row(
+                children: [
+                  Expanded(child: TextField(controller: _percentCtrl, focusNode: _percentFocus, keyboardType: TextInputType.number, inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))], decoration: const InputDecoration(labelText: '%', isDense: true, border: OutlineInputBorder()), onChanged: (v) => CalculatorManager.instance.updatePercent(widget.item.productId, v))),
+                  const SizedBox(width: 8),
+                  Expanded(child: TextField(controller: _rubCtrl, focusNode: _rubFocus, keyboardType: TextInputType.number, inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))], decoration: const InputDecoration(labelText: 'Руб.', isDense: true, border: OutlineInputBorder()), onChanged: (v) => CalculatorManager.instance.updateRub(widget.item.productId, v))),
+                  const SizedBox(width: 8),
+                  Expanded(child: TextField(controller: _finalCtrl, focusNode: _finalFocus, keyboardType: TextInputType.number, inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))], decoration: const InputDecoration(labelText: 'Итого', isDense: true, border: OutlineInputBorder()), style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold), onChanged: (v) => CalculatorManager.instance.updateFinal(widget.item.productId, v))),
+                ],
+              ),
+
+              const SizedBox(height: 12),
+
+              // СТРОКА 5: Площадь и Норма
               Row(
                 children: [
                   Expanded(
@@ -483,22 +401,21 @@ class _CalculatorItemCardState extends State<_CalculatorItemCard> {
                       focusNode: _rateFocus,
                       keyboardType: const TextInputType.numberWithOptions(decimal: true),
                       inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))],
-                      decoration: const InputDecoration(labelText: 'Норма, на га', isDense: true, border: OutlineInputBorder()),
+                      decoration: InputDecoration(labelText: 'Норма, $unit/га', isDense: true, border: const OutlineInputBorder()),
                       onChanged: (v) => CalculatorManager.instance.updateRate(widget.item.productId, v),
                     ),
                   ),
                 ],
               ),
-            ],
 
-            // --- СТРОКА 4: Итоговый расчет ---
-            const SizedBox(height: 12),
-            if (widget.isAreaMode)
+              const SizedBox(height: 12),
+
+              // СТРОКА 6: Итоговый расчет
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(
-                    'Требуется: ${widget.item.requiredVolume.toStringAsFixed(2)} ${widget.item.packageUnit} (${widget.item.packagesCount} уп.)',
+                    'Требуется: ${widget.item.requiredVolume.toStringAsFixed(2)} $unit',
                     style: const TextStyle(fontSize: 14, color: Colors.black87),
                   ),
                   Text(
@@ -506,22 +423,10 @@ class _CalculatorItemCardState extends State<_CalculatorItemCard> {
                     style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.green),
                   ),
                 ],
-              )
-            else
-              // Поля ввода скидки (как было)
-              Row(
-                children: [
-                  Expanded(child: TextField(controller: _percentCtrl, focusNode: _percentFocus, keyboardType: TextInputType.number, inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))], decoration: const InputDecoration(labelText: '%', isDense: true, border: OutlineInputBorder()), onChanged: (v) => CalculatorManager.instance.updatePercent(widget.item.productId, v))),
-                  const SizedBox(width: 8),
-                  Expanded(child: TextField(controller: _rubCtrl, focusNode: _rubFocus, keyboardType: TextInputType.number, inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))], decoration: const InputDecoration(labelText: 'Руб.', isDense: true, border: OutlineInputBorder()), onChanged: (v) => CalculatorManager.instance.updateRub(widget.item.productId, v))),
-                  const SizedBox(width: 8),
-                  Expanded(child: TextField(controller: _finalCtrl, focusNode: _finalFocus, keyboardType: TextInputType.number, inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))], decoration: const InputDecoration(labelText: 'Итого', isDense: true, border: OutlineInputBorder()), style: const TextStyle(color: Colors.green, fontWeight: FontWeight.bold), onChanged: (v) => CalculatorManager.instance.updateFinal(widget.item.productId, v))),
-                  IconButton(icon: const Icon(Icons.refresh), onPressed: () => CalculatorManager.instance.resetItem(widget.item.productId), visualDensity: VisualDensity.compact),
-                ],
               ),
-          ],
+            ],
+          ),
         ),
-      ),
-    );
+      );
   }
 }

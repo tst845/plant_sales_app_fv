@@ -7,6 +7,7 @@ import '../database/database_helper.dart';
 import '../models/product.dart';
 import 'dart:io';
 import 'dart:typed_data';
+import '../models/order.dart';
 
 // ============================================================
 // Структуры данных
@@ -188,6 +189,434 @@ class SettingsScreen extends StatelessWidget {
     }
     return null;
   }
+
+  // --------------- Метод экспорта заказов ----------
+  Future<void> _exportOrders(BuildContext context) async {
+    final orders = await DatabaseHelper.instance.getAllOrders();
+    if (orders.isEmpty) {
+      _showMessage(context, 'В базе нет заказов для экспорта');
+      return;
+    }
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Экспорт заказов'),
+        content: const Text('Будет создан Excel-файл с двумя листами:\n'
+            '1. «Заказы» (общая информация)\n'
+            '2. «Позиции» (список препаратов в заказах).\n\nПродолжить?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+          ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Экспортировать')),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    showDialog(context: context, barrierDismissible: false, builder: (ctx) => const AlertDialog(content: Row(children: [CircularProgressIndicator(), SizedBox(width: 20), Text('Генерация файла...')])));
+
+    try {
+      final excel = Excel.createExcel();
+      
+      // --- Лист 1: Заказы ---
+      final sheetOrders = excel['Заказы'];
+      sheetOrders.appendRow([
+        TextCellValue('ID заказа'), TextCellValue('Дата'), TextCellValue('Клиент'),
+        TextCellValue('Статус'), TextCellValue('Примечание'), TextCellValue('Итоговая сумма')
+      ]);
+
+      // --- Лист 2: Позиции ---
+      final sheetItems = excel['Позиции'];
+      sheetItems.appendRow([
+        TextCellValue('ID заказа'), TextCellValue('ID Препарата'), TextCellValue('Наименование'),
+        TextCellValue('Цена (базовая)'), TextCellValue('Скидка %'), TextCellValue('Норма расхода'),
+        TextCellValue('Площадь, га'), TextCellValue('Ед. изм.'), TextCellValue('Стоимость позиции')
+      ]);
+
+      if (excel.sheets.containsKey('Sheet1')) excel.delete('Sheet1');
+
+      for (var order in orders) {
+        final dateStr = '${order.orderDate.day}.${order.orderDate.month}.${order.orderDate.year}';
+        
+        // Пишем в лист Заказов
+        sheetOrders.appendRow([
+          IntCellValue(order.id!),
+          TextCellValue(dateStr),
+          TextCellValue(order.clientName),
+          TextCellValue(order.status),
+          TextCellValue(order.notes ?? ''),
+          DoubleCellValue(order.totalAmount),
+        ]);
+
+        // Пишем в лист Позиций
+        for (var item in order.items) {
+          sheetItems.appendRow([
+            IntCellValue(order.id!),
+            item.productId != null ? IntCellValue(item.productId!) : TextCellValue(''),
+            TextCellValue(item.productName),
+            DoubleCellValue(item.basePrice),
+            DoubleCellValue(item.discountPercent),
+            DoubleCellValue(item.rate),
+            DoubleCellValue(item.area),
+            TextCellValue(item.packageUnit),
+            DoubleCellValue(item.totalPrice),
+          ]);
+        }
+      }
+
+      final bytes = excel.save();
+      if (bytes == null) throw Exception('Ошибка генерации');
+
+      if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
+
+      final now = DateTime.now();
+      final fileName = 'orders_backup_${now.year}-${now.month}-${now.day}.xlsx';
+
+      final Uri? outputUri = await FilePicker.saveFile(
+        dialogTitle: 'Сохранить бэкап заказов',
+        fileName: fileName,
+        bytes: Uint8List.fromList(bytes),
+        type: FileType.custom,
+        allowedExtensions: ['xlsx'],
+      );
+
+      if (outputUri != null && context.mounted) {
+        _showMessage(context, 'Заказы успешно экспортированы!', isSuccess: true);
+      }
+    } catch (e) {
+      if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
+      if (context.mounted) _showMessage(context, 'Ошибка: $e');
+    }
+  }
+
+  // --------------- Метод импорта  заказов  ----------
+  Future<void> _importOrders(BuildContext context) async {
+    try {
+      final result = await FilePicker.pickFiles(type: FileType.custom, allowedExtensions: ['xlsx']);
+      if (result == null) return;
+      
+      final bytes = await result.first.readAsBytes();
+      final excel = Excel.decodeBytes(bytes);
+      final allSheetNames = excel.tables.keys.toList();
+
+      if (allSheetNames.isEmpty) {
+        _showMessage(context, 'Файл пуст');
+        return;
+      }
+
+      // 1. СОПОСТАВЛЕНИЕ ЛИСТОВ
+      final mapping = await _showOrderSheetMappingDialog(context, allSheetNames);
+      if (mapping == null) return;
+
+      final ordersSheetName = mapping['orders'];
+      final itemsSheetName = mapping['items'];
+
+      if (ordersSheetName == null && itemsSheetName == null) {
+        _showMessage(context, 'Не выбрано ни одного листа для импорта');
+        return;
+      }
+
+      // 2. ПАРСИНГ ЗАКАЗОВ (Лист 1)
+      List<Order> parsedOrders = [];
+      List<String> parseErrors = [];
+
+      if (ordersSheetName != null) {
+        final sheet = excel.tables[ordersSheetName]!;
+        int headerRow = _findHeaderRow(sheet, [
+          ['id', 'номер'], 
+          ['клиент', 'заказчик', 'контрагент']
+        ]);
+        if (headerRow == -1) {
+          _showMessage(context, 'Не найдены обязательные колонки в листе Заказы (ID, Клиент)');
+          return;
+        }
+
+        final headers = sheet.rows[headerRow].map((c) => _safeCellText(c).toLowerCase()).toList();
+        int idIdx = _findCol(headers, ['id', 'номер']);
+        int clientIdx = _findCol(headers, ['клиент', 'заказчик']);
+        int dateIdx = _findCol(headers, ['дата']);
+        int statusIdx = _findCol(headers, ['статус']);
+        int notesIdx = _findCol(headers, ['примечан', 'коммент']);
+
+        for (int i = headerRow + 1; i < sheet.rows.length; i++) {
+          final row = sheet.rows[i];
+          if (row.isEmpty) continue;
+          
+          final idStr = _safeCellText(row[idIdx]);
+          final client = _safeCellText(row[clientIdx]);
+          
+          if (idStr.isEmpty || client.isEmpty) {
+            parseErrors.add('Заказы, строка ${i+1}: пропущен ID или Клиент');
+            continue;
+          }
+
+          final id = int.tryParse(idStr);
+          if (id == null) {
+            parseErrors.add('Заказы, строка ${i+1}: некорректный ID ($idStr)');
+            continue;
+          }
+
+          DateTime date = DateTime.now();
+          if (dateIdx != -1) {
+            final dStr = _safeCellText(row[dateIdx]);
+            try { date = DateTime.parse(dStr); } catch(_) {}
+          }
+
+          parsedOrders.add(Order(
+            id: id, clientName: client, orderDate: date, items: [],
+            status: statusIdx != -1 ? _safeCellText(row[statusIdx]) : 'Новый',
+            notes: notesIdx != -1 ? _safeCellText(row[notesIdx]) : null,
+          ));
+        }
+      }
+
+      // 3. ПАРСИНГ ПОЗИЦИЙ (Лист 2)
+      if (itemsSheetName != null) {
+        final sheet = excel.tables[itemsSheetName]!;
+        int headerRow = _findHeaderRow(sheet, [
+          ['id заказа', 'заказ'], 
+          ['наименование', 'название', 'препарат']
+        ]);
+        if (headerRow == -1) {
+          _showMessage(context, 'Не найдены обязательные колонки в листе Позиции (ID заказа, Наименование)');
+          return;
+        }
+
+        final headers = sheet.rows[headerRow].map((c) => _safeCellText(c).toLowerCase()).toList();
+        int orderIdIdx = _findCol(headers, ['id заказа', 'заказ']);
+        int prodIdIdx = _findCol(headers, ['id препарата', 'id товара']);
+        int nameIdx = _findCol(headers, ['наименование', 'название', 'препарат']);
+        int priceIdx = _findCol(headers, ['цена']);
+        int discIdx = _findCol(headers, ['скидк']);
+        int rateIdx = _findCol(headers, ['норм']);
+        int areaIdx = _findCol(headers, ['площад']);
+        int unitIdx = _findCol(headers, ['ед', 'измер']);
+
+        for (int i = headerRow + 1; i < sheet.rows.length; i++) {
+          final row = sheet.rows[i];
+          if (row.isEmpty) continue;
+
+          final orderIdStr = _safeCellText(row[orderIdIdx]);
+          final name = _safeCellText(row[nameIdx]);
+
+          if (orderIdStr.isEmpty || name.isEmpty) {
+             parseErrors.add('Позиции, строка ${i+1}: пропущен ID заказа или Наименование');
+             continue;
+          }
+
+          final orderId = int.tryParse(orderIdStr);
+          if (orderId == null) continue;
+
+          // Ищем заказ в спарсенных или в БД
+          Order? targetOrder = parsedOrders.where((o) => o.id == orderId).firstOrNull;
+          
+          int? prodId;
+          if (prodIdIdx != -1) {
+            prodId = int.tryParse(_safeCellText(row[prodIdIdx]));
+          }
+
+          final item = OrderItem(
+            productId: prodId,
+            productName: name,
+            basePrice: priceIdx != -1 ? (double.tryParse(_safeCellText(row[priceIdx]).replaceAll(',', '.')) ?? 0) : 0,
+            discountPercent: discIdx != -1 ? (double.tryParse(_safeCellText(row[discIdx]).replaceAll(',', '.')) ?? 0) : 0,
+            rate: rateIdx != -1 ? (double.tryParse(_safeCellText(row[rateIdx]).replaceAll(',', '.')) ?? 0) : 1,
+            area: areaIdx != -1 ? (double.tryParse(_safeCellText(row[areaIdx]).replaceAll(',', '.')) ?? 0) : 1,
+            packageUnit: unitIdx != -1 ? _safeCellText(row[unitIdx]) : 'л',
+          );
+
+          if (targetOrder != null) {
+            targetOrder.items.add(item);
+          } else {
+            // Если импортируем только позиции, сохраняем их во временный список
+            parseErrors.add('Позиции, строка ${i+1}: Заказ №$orderId не найден в файле (будет попытка привязки к БД)');
+            // Мы можем добавить логику сохранения во временный массив для привязки к БД позже.
+          }
+        }
+      }
+
+      if (parsedOrders.isEmpty && itemsSheetName == null) {
+        _showMessage(context, 'Не найдено валидных заказов для импорта');
+        return;
+      }
+
+      // 4. ВЫБОР РЕЖИМА ИМПОРТА
+      final mode = await showDialog<String>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Режим импорта'),
+          content: Text('Найдено заказов для импорта: ${parsedOrders.length}.\nОшибок при чтении: ${parseErrors.length}.\n\nКак применить данные?'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, 'cancel'), child: const Text('Отмена')),
+            TextButton(onPressed: () => Navigator.pop(ctx, 'add'), child: const Text('Только новые')),
+            TextButton(onPressed: () => Navigator.pop(ctx, 'update'), child: const Text('Обновить и добавить')),
+            ElevatedButton(onPressed: () => Navigator.pop(ctx, 'replace'), child: const Text('Заменить всё')),
+          ],
+        ),
+      );
+
+      if (mode == null || mode == 'cancel') return;
+
+      // 5. СОХРАНЕНИЕ В БД
+      showDialog(context: context, barrierDismissible: false, builder: (ctx) => const AlertDialog(content: Row(children: [CircularProgressIndicator(), SizedBox(width: 20), Text('Сохранение данных...')])));
+
+      final db = DatabaseHelper.instance;
+      
+      if (mode == 'replace') {
+        await db.deleteAllOrders();
+      }
+
+      final existingIds = await db.getAllOrderIds();
+      final productsMap = await db.getProductsIdMap();
+      
+      int added = 0, updated = 0;
+
+      for (var order in parsedOrders) {
+        // Разрешаем препараты (привязка по ID или создание заглушки)
+        for (int i = 0; i < order.items.length; i++) {
+          var item = order.items[i];
+          int? resolvedId = item.productId;
+
+          // Если ID есть, но такого препарата нет в БД -> сбрасываем ID
+          if (resolvedId != null && !productsMap.containsKey(resolvedId)) {
+            resolvedId = null;
+          }
+
+          // Если ID нет, ищем по имени
+          if (resolvedId == null) {
+            final existing = productsMap.values.where((p) => p.name.toLowerCase() == item.productName.toLowerCase()).firstOrNull;
+            if (existing != null) {
+              resolvedId = existing.id;
+            } else {
+              // Создаем заглушку
+              resolvedId = await db.createStubProduct(item.productName);
+              productsMap[resolvedId] = Product(id: resolvedId, name: item.productName, category: 'Импортированные (без категории)');
+            }
+          }
+          
+          // Обновляем ID в объекте позиции
+          order.items[i] = item.copyWith(productId: resolvedId);
+        }
+
+        // Сохраняем заказ
+        if (existingIds.contains(order.id)) {
+          if (mode == 'update') {
+            await db.updateOrder(order);
+            updated++;
+          }
+        } else {
+          await db.insertOrderWithId(order);
+          added++;
+        }
+      }
+
+      if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
+      
+      DatabaseHelper.dbUpdateTrigger.value++; // Обновляем UI
+
+      // 6. ОТЧЕТ
+      String report = 'Импорт завершен.\nДобавлено: $added\nОбновлено: $updated\n';
+      if (parseErrors.isNotEmpty) {
+        report += '\nПропущено/Ошибки: ${parseErrors.length}';
+      }
+
+      _showMessage(context, report, isSuccess: true);
+
+    } catch (e, st) {
+      if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
+      debugPrint('Order import error: $e\n$st');
+      if (context.mounted) _showMessage(context, 'Ошибка импорта заказов: $e');
+    }
+  }
+
+  // --- Вспомогательные методы для импорта ---
+  int _findHeaderRow(Sheet sheet, List<List<String>> keywordGroups) {
+    for (int i = 0; i < sheet.rows.length && i < 20; i++) {
+      final row = sheet.rows[i];
+      if (row.isEmpty) continue;
+      final rowStr = row.map((c) => _safeCellText(c).toLowerCase()).join(' ');
+      
+      bool allGroupsFound = true;
+      for (var group in keywordGroups) {
+        bool groupFound = false;
+        for (var kw in group) {
+          if (rowStr.contains(kw)) {
+            groupFound = true;
+            break;
+          }
+        }
+        if (!groupFound) { 
+          allGroupsFound = false; 
+          break; 
+        }
+      }
+      if (allGroupsFound) return i;
+    }
+    return -1;
+  }
+
+  int _findCol(List<String> headers, List<String> keywords) {
+    for (int i = 0; i < headers.length; i++) {
+      for (var kw in keywords) {
+        if (headers[i].contains(kw)) return i;
+      }
+    }
+    return -1;
+  }
+
+  Future<Map<String, String?>?> _showOrderSheetMappingDialog(BuildContext context, List<String> sheets) async {
+    String? ordersSheet = sheets.where((s) => s.toLowerCase().contains('заказ')).firstOrNull;
+    String? itemsSheet = sheets.where((s) => s.toLowerCase().contains('позиц') || s.toLowerCase().contains('препарат')).firstOrNull;
+
+    return showDialog<Map<String, String?>>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setState) => AlertDialog(
+          title: const Text('Сопоставление листов'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('Укажите, какой лист содержит какую информацию:'),
+              const SizedBox(height: 16),
+              DropdownButtonFormField<String>(
+                decoration: const InputDecoration(labelText: 'Лист с Заказами (Шапки)'),
+                value: ordersSheet,
+                items: [
+                  const DropdownMenuItem(value: null, child: Text('Нет')),
+                  ...sheets.map((s) => DropdownMenuItem(value: s, child: Text(s))),
+                ],
+                onChanged: (val) => setState(() => ordersSheet = val),
+              ),
+              const SizedBox(height: 16),
+              DropdownButtonFormField<String>(
+                decoration: const InputDecoration(labelText: 'Лист с Позициями (Препараты)'),
+                value: itemsSheet,
+                items: [
+                  const DropdownMenuItem(value: null, child: Text('Нет')),
+                  ...sheets.map((s) => DropdownMenuItem(value: s, child: Text(s))),
+                ],
+                onChanged: (val) => setState(() => itemsSheet = val),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, null), child: const Text('Отмена')),
+            ElevatedButton(
+              onPressed: () {
+                if (ordersSheet == null && itemsSheet == null) return;
+                Navigator.pop(ctx, {'orders': ordersSheet, 'items': itemsSheet});
+              }, 
+              child: const Text('Импортировать')
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // ---------- UI: Виджет диалога прогресса ----------
   Widget _buildProgressDialog(
       BuildContext context, ValueNotifier<String> progressNotifier, VoidCallback onCancel) {
@@ -1982,86 +2411,200 @@ class SettingsScreen extends StatelessWidget {
       }
     }
   }
+    // Обертка для подтверждения действия
+  Future<bool> _confirmAction(BuildContext context, String title, String message) async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: Text(title),
+            content: Text(message),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Удалить', style: TextStyle(color: Colors.white)),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+
+  // 1. Очистка заказов
+  Future<void> _clearOrders(BuildContext context) async {
+    if (!await _confirmAction(context, 'Очистка заказов', 'Вы уверены, что хотите удалить ВСЕ заказы? Каталог препаратов останется без изменений.')) return;
+    try {
+      await DatabaseHelper.instance.clearOrdersOnly();
+      DatabaseHelper.dbUpdateTrigger.value++;
+      if (context.mounted) _showMessage(context, 'Все заказы удалены', isSuccess: true);
+    } catch (e) {
+      if (context.mounted) _showMessage(context, 'Ошибка: $e');
+    }
+  }
+
+  // 2. Очистка каталога
+  Future<void> _clearProducts(BuildContext context) async {
+    if (!await _confirmAction(context, 'Очистка каталога', 'Вы уверены, что хотите удалить ВСЕ препараты?\n\nИстория заказов сохранится, но позиции в них потеряют связь с каталогом.')) return;
+    try {
+      await DatabaseHelper.instance.clearProductsOnly();
+      DatabaseHelper.dbUpdateTrigger.value++;
+      if (context.mounted) _showMessage(context, 'Каталог препаратов удален', isSuccess: true);
+    } catch (e) {
+      if (context.mounted) _showMessage(context, 'Ошибка: $e');
+    }
+  }
+
+  // 3. Полный сброс
+  Future<void> _clearEverything(BuildContext context) async {
+    if (!await _confirmAction(context, 'ПОЛНЫЙ СБРОС', 'ВНИМАНИЕ! Будут удалены ВСЕ данные: заказы, препараты, справочники культур и болезней.\n\nЭто действие нельзя отменить. Продолжить?')) return;
+    try {
+      await DatabaseHelper.instance.clearEverything();
+      DatabaseHelper.dbUpdateTrigger.value++;
+      if (context.mounted) _showMessage(context, 'База данных полностью очищена', isSuccess: true);
+    } catch (e) {
+      if (context.mounted) _showMessage(context, 'Ошибка: $e');
+    }
+  }
   // ============================================================
   // UI
   // ============================================================
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Text('Настройки', style: TextStyle(fontSize: 24)),
-          const SizedBox(height: 40),
-          ElevatedButton.icon(
-            onPressed: () => _importFromExcel(context),
-            icon: const Icon(Icons.upload_file),
-            label: const Text('Импортировать препараты из Excel'),
-            style: ElevatedButton.styleFrom(
-              minimumSize: const Size(250, 50), 
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), // чтобы текст не прилипал
+    return SingleChildScrollView( // <-- ОБЯЗАТЕЛЬНО: защита от переполнения экрана
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text('Настройки', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 30),
+            
+            // --- БЛОК ИМПОРТА ---
+            ElevatedButton.icon(
+              onPressed: () => _importFromExcel(context),
+              icon: const Icon(Icons.upload_file),
+              label: const Text('Импортировать препараты из Excel'),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size(250, 50),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
               ),
-          ),
-          const SizedBox(height: 20),
-          ElevatedButton.icon(
-            onPressed: () => _importPartialUpdate(context),
-            icon: const Icon(Icons.update),
-            label: const Text('Выборочное обновление данных'),
-            style: ElevatedButton.styleFrom(
-              minimumSize: const Size(250, 50), 
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), // чтобы текст не прилипал
-              backgroundColor: Colors.blue.shade700,
-              foregroundColor: Colors.white,
             ),
-          ),
-          const SizedBox(height: 20),
-          ElevatedButton.icon(
-            onPressed: () => _exportToExcel(context),
-            icon: const Icon(Icons.download),
-            label: const Text('Экспортировать базу в Excel'),
-            style: ElevatedButton.styleFrom(
-              minimumSize: const Size(250, 50), 
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), // чтобы текст не прилипал
-              backgroundColor: Colors.green.shade700,
-              foregroundColor: Colors.white,
+            const SizedBox(height: 15),
+            ElevatedButton.icon(
+              onPressed: () => _importPartialUpdate(context),
+              icon: const Icon(Icons.update),
+              label: const Text('Выборочное обновление данных'),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size(250, 50),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                backgroundColor: Colors.blue.shade700,
+                foregroundColor: Colors.white,
+              ),
             ),
-          ),
-          const SizedBox(height: 20),
-          ElevatedButton.icon(
-            onPressed: () => _clearDatabase(context),
-            icon: const Icon(Icons.delete_forever),
-            label: const Text('Очистить базу данных'),
-            style: ElevatedButton.styleFrom(
-              minimumSize: const Size(250, 50), 
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), // чтобы текст не прилипал
-              
-              backgroundColor: Colors.red,
-              foregroundColor: Colors.white,
+            const SizedBox(height: 15),
+            
+            // --- БЛОК ЗАКАЗОВ ---
+            ElevatedButton.icon(
+              onPressed: () => _importOrders(context),
+              icon: const Icon(Icons.shopping_cart),
+              label: const Text('Импортировать заказы из Excel'),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size(250, 50),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                backgroundColor: Colors.teal,
+                foregroundColor: Colors.white,
+              ),
             ),
-          ),
-        
-          const SizedBox(height: 20),
-          ElevatedButton.icon(
-            onPressed: () async {
-              showDialog(context: context, barrierDismissible: false, builder: (ctx) => const AlertDialog(content: Row(children: [CircularProgressIndicator(), SizedBox(width: 20), Text('Очистка данных...')])));
-              await DatabaseHelper.instance.cleanDatabaseReferences();
-              if (context.mounted) {
-                Navigator.of(context, rootNavigator: true).pop();
-                _showMessage(context, 'Справочники культур и болезней очищены от мусора!', isSuccess: true);
-              }
-            },
-            icon: const Icon(Icons.cleaning_services),
-            label: const Text('Очистить справочники от мусора'),
-            style: ElevatedButton.styleFrom(
-              minimumSize: const Size(250, 50), 
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12), // чтобы текст не прилипал
-              
-              backgroundColor: Colors.orange.shade800,
-              foregroundColor: Colors.white,
+            const SizedBox(height: 15),
+            ElevatedButton.icon(
+              onPressed: () => _exportOrders(context),
+              icon: const Icon(Icons.archive),
+              label: const Text('Экспортировать заказы в Excel'),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size(250, 50),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                backgroundColor: Colors.teal.shade700,
+                foregroundColor: Colors.white,
+              ),
             ),
-          ),  
-        ],
+            const SizedBox(height: 15),
+            
+            // --- БЛОК ЭКСПОРТА КАТАЛОГА ---
+            ElevatedButton.icon(
+              onPressed: () => _exportToExcel(context),
+              icon: const Icon(Icons.download),
+              label: const Text('Экспортировать каталог в Excel'),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size(250, 50),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                backgroundColor: Colors.green.shade700,
+                foregroundColor: Colors.white,
+              ),
+            ),
+            
+            const SizedBox(height: 30),
+            const Divider(),
+            const SizedBox(height: 10),
+
+            // --- ВЫПАДАЮЩИЙ СПИСОК ОЧИСТКИ (ExpansionTile) ---
+            Card(
+              elevation: 2,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+                side: BorderSide(color: Colors.red.shade200, width: 1),
+              ),
+              child: ExpansionTile(
+                leading: Icon(Icons.warning_amber_rounded, color: Colors.red.shade700),
+                title: Text(
+                  'Очистка данных',
+                  style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red.shade700),
+                ),
+                subtitle: const Text('Удаление заказов, каталога или полный сброс'),
+                childrenPadding: const EdgeInsets.all(16),
+                expandedCrossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  ElevatedButton.icon(
+                    onPressed: () => _clearOrders(context),
+                    icon: const Icon(Icons.shopping_cart_outlined),
+                    label: const Text('Очистить только заказы'),
+                    style: ElevatedButton.styleFrom(
+                      minimumSize: const Size(double.infinity, 45), // Кнопка на всю ширину
+                      backgroundColor: Colors.orange.shade700,
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  ElevatedButton.icon(
+                    onPressed: () => _clearProducts(context),
+                    icon: const Icon(Icons.inventory_2_outlined),
+                    label: const Text('Очистить только каталог препаратов'),
+                    style: ElevatedButton.styleFrom(
+                      minimumSize: const Size(double.infinity, 45),
+                      backgroundColor: Colors.deepOrange.shade700,
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  ElevatedButton.icon(
+                    onPressed: () => _clearEverything(context),
+                    icon: const Icon(Icons.delete_forever),
+                    label: const Text('ПОЛНЫЙ СБРОС (удалить всё)'),
+                    style: ElevatedButton.styleFrom(
+                      minimumSize: const Size(double.infinity, 45),
+                      backgroundColor: Colors.red,
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 40), // Отступ снизу для красоты
+          ],
+        ),
       ),
     );
   }
+
+
 }

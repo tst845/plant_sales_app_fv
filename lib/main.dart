@@ -1,17 +1,31 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'models/order.dart'; 
+import 'database/database_helper.dart';
 import 'screens/catalog_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/calculator_screen.dart';
 import 'screens/calculator_manager.dart';
 import 'screens/order_manager.dart';
-import 'models/order.dart'; 
 import 'screens/orders_screen.dart';
-
 
 
 final ValueNotifier<int> mainScreenTabNotifier = ValueNotifier<int>(0);
 
-void main() {
+void main() async { // <-- Добавлено ключевое слово 'async'
+  WidgetsFlutterBinding.ensureInitialized();
+  
+  // Проверяем, первый ли это запуск
+  final prefs = await SharedPreferences.getInstance();
+  bool isFirstRun = prefs.getBool('isFirstRun') ?? true;
+
+  if (isFirstRun) {
+    // Вставляем тестовые данные
+    await DatabaseHelper.instance.insertSampleData();
+    // Запоминаем, что первый запуск прошел
+    await prefs.setBool('isFirstRun', false);
+  }
+
   runApp(const MyApp());
 }
 

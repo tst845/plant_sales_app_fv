@@ -10,6 +10,8 @@ import 'calculator_manager.dart';
 import '../services/filter_manager.dart';
 import '../models/order.dart';
 import 'order_manager.dart';
+import 'order_edit_screen.dart';
+import '../main.dart';
 
 class CatalogFilter {
   Set<String> categories = {};
@@ -654,27 +656,17 @@ class _CatalogScreenState extends State<CatalogScreen> {
   OrderItem _createOrderItem(Product p) {
     double rate = 1.0;
     if (p.consumptionRate != null && p.consumptionRate!.isNotEmpty) {
-      // Ищем первое число (например, из "0,7-1,0" возьмет 0.7)
       final match = RegExp(r'(\d+[.,]?\d*)').firstMatch(p.consumptionRate!);
-      if (match != null) {
-        rate = double.tryParse(match.group(1)!.replaceAll(',', '.')) ?? 1.0;
-      }
+      if (match != null) rate = double.tryParse(match.group(1)!.replaceAll(',', '.')) ?? 1.0;
     }
 
-    double packageVolume = 1.0;
-    String packageUnit = 'ед.';
+    String unit = 'л';
     if (p.package != null && p.package!.isNotEmpty) {
-      // Ищем число, за которым может идти пробел или сразу буква (например "10л" или "10 л")
-      final matchVol = RegExp(r'(\d+([.,]\d+)?)\s*([а-яА-Яa-zA-Z]*)').firstMatch(p.package!);
-      if (matchVol != null) {
-        packageVolume = double.tryParse(matchVol.group(1)!.replaceAll(',', '.')) ?? 1.0;
-        final unitStr = (matchVol.group(3) ?? '').toLowerCase();
-        
-        if (unitStr.contains('мл')) packageUnit = 'мл';
-        else if (unitStr.contains('кг')) packageUnit = 'кг';
-        else if (unitStr.contains('г')) packageUnit = 'г';
-        else if (unitStr.contains('л')) packageUnit = 'л';
-      }
+      final lower = p.package!.toLowerCase();
+      if (lower.contains('кг')) unit = 'кг';
+      else if (lower.contains('г')) unit = 'г';
+      else if (lower.contains('мл')) unit = 'мл';
+      else if (lower.contains('л')) unit = 'л';
     }
 
     return OrderItem(
@@ -684,8 +676,8 @@ class _CatalogScreenState extends State<CatalogScreen> {
       discountPercent: 0.0,
       rate: rate,
       area: 1.0,
-      packageVolume: packageVolume,
-      packageUnit: packageUnit,
+      // packageVolume: 1.0, // Больше не используется, но оставляем для совместимости
+      packageUnit: unit,
     );
   }
 
@@ -781,81 +773,79 @@ class _CatalogScreenState extends State<CatalogScreen> {
                   onPressed: _loadData,
                 ),
               ],
-        bottom: PreferredSize(
-          preferredSize: Size.fromHeight(_isSelectionConfirmed ? 0 : (_filter.hasActiveFilters ? 150 : 100)),
-          child: _isSelectionConfirmed 
-              ? const SizedBox.shrink() // В Фазе 2 скрываем поиск и фильтры полностью
-              : Padding(
-                  padding: const EdgeInsets.all(8.0),
-                  child: Column(
-                    children: [
-                      TextField(
-                        controller: _searchController,
-                        focusNode: _searchFocusNode,
-                        decoration: InputDecoration(
-                          hintText: 'Поиск...',
-                          prefixIcon: const Icon(Icons.search),
-                          suffixIcon: _searchQuery.isNotEmpty
-                              ? IconButton(
-                                  icon: const Icon(Icons.clear),
-                                  onPressed: () {
-                                    _searchController.clear();
-                                    setState(() => _searchQuery = '');
-                                    _hideKeyboard();
-                                  },
-                                )
-                              : null,
-                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-                          contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                        ),
-                        onChanged: (v) => setState(() => _searchQuery = v),
-                        onSubmitted: (_) => _hideKeyboard(),
-                      ),
-                      const SizedBox(height: 8),
-                      if (_filter.hasActiveFilters)
-                        SizedBox(
-                          height: 36,
-                          child: ListView(
-                            scrollDirection: Axis.horizontal,
-                            children: [
-                              ..._filter.categories.map((e) => _buildActiveFilterChip(e, () => setState(() => _filter.categories.remove(e)))),
-                              ..._filter.cultures.map((e) => _buildActiveFilterChip(e, () => setState(() => _filter.cultures.remove(e)))),
-                              ..._filter.diseases.map((e) => _buildActiveFilterChip(e, () => setState(() => _filter.diseases.remove(e)))),
-                              if (_filter.minPrice != null || _filter.maxPrice != null)
-                                _buildActiveFilterChip('Цена: ${_filter.minPrice ?? 0} - ${_filter.maxPrice ?? '∞'}', () => setState(() { _filter.minPrice = null; _filter.maxPrice = null; })),
-                              Padding(
-                                padding: const EdgeInsets.only(left: 8),
-                                child: ActionChip(label: const Text('Сбросить все', style: TextStyle(color: Colors.red, fontSize: 12)), onPressed: () => setState(() => _filter.reset())),
-                              )
-                            ],
+          bottom: PreferredSize(
+            preferredSize: Size.fromHeight(_isSelectionConfirmed ? 0 : (_filter.hasActiveFilters ? 110 : 60)),
+            child: _isSelectionConfirmed 
+                ? const SizedBox.shrink()
+                : Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0), // Уменьшили отступы
+                    child: Column(
+                      children: [
+                        TextField(
+                          controller: _searchController,
+                          focusNode: _searchFocusNode,
+                          decoration: InputDecoration(
+                            hintText: 'Поиск...',
+                            prefixIcon: const Icon(Icons.search),
+                            suffixIcon: _searchQuery.isNotEmpty
+                                ? IconButton(
+                                    icon: const Icon(Icons.clear),
+                                    onPressed: () {
+                                      _searchController.clear();
+                                      setState(() => _searchQuery = '');
+                                      _hideKeyboard();
+                                    },
+                                  )
+                                : null,
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                            contentPadding: const EdgeInsets.symmetric(vertical: 4, horizontal: 12), // Стало компактнее
+                            isDense: true, // Убирает лишние внутренние отступы
                           ),
+                          onChanged: (v) => setState(() => _searchQuery = v),
+                          onSubmitted: (_) => _hideKeyboard(),
                         ),
-                    ],
+                        if (_filter.hasActiveFilters) ...[
+                          const SizedBox(height: 4), // Уменьшили отступ
+                          SizedBox(
+                            height: 36,
+                            child: ListView(
+                              scrollDirection: Axis.horizontal,
+                              children: [
+                                ..._filter.categories.map((e) => _buildActiveFilterChip(e, () => setState(() => _filter.categories.remove(e)))),
+                                ..._filter.cultures.map((e) => _buildActiveFilterChip(e, () => setState(() => _filter.cultures.remove(e)))),
+                                ..._filter.diseases.map((e) => _buildActiveFilterChip(e, () => setState(() => _filter.diseases.remove(e)))),
+                                if (_filter.minPrice != null || _filter.maxPrice != null)
+                                  _buildActiveFilterChip('Цена: ${_filter.minPrice ?? 0} - ${_filter.maxPrice ?? '∞'}', () => setState(() { _filter.minPrice = null; _filter.maxPrice = null; })),
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 8),
+                                  child: ActionChip(label: const Text('Сбросить все', style: TextStyle(color: Colors.red, fontSize: 12)), onPressed: () => setState(() => _filter.reset())),
+                                )
+                              ],
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
-                ),
-        ),
+            ),
       ),
       body: ValueListenableBuilder<List<CalcItem>>(
         valueListenable: CalculatorManager.instance.items,
         builder: (context, calcItems, child) {
-          return ValueListenableBuilder<bool>(
-            valueListenable: CalculatorManager.instance.isAreaMode,
-            builder: (context, isAreaMode, child) {
-              return GestureDetector(
-                onTap: _hideKeyboard,
-                child: _isLoading
-                    ? const Center(child: CircularProgressIndicator())
-                    : filtered.isEmpty
-                        ? const Center(child: Text('Нет препаратов, соответствующих фильтру'))
-                        : ListView.builder(
-                            padding: const EdgeInsets.all(8),
-                            itemCount: filtered.length,
-                            itemBuilder: (context, index) {
-                              return _buildProductCard(filtered[index], calcItems, isAreaMode); 
-                              },
-                          ),
-              );
-            },
+          return GestureDetector(
+            onTap: _hideKeyboard,
+            child: _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : filtered.isEmpty
+                    ? const Center(child: Text('Нет препаратов, соответствующих фильтру'))
+                    : ListView.builder(
+                        padding: const EdgeInsets.all(8),
+                        itemCount: filtered.length,
+                        itemBuilder: (context, index) {
+                          // Убрали передачу isAreaMode
+                          return _buildProductCard(filtered[index], calcItems); 
+                        },
+                      ),
           );
         },
       ),
@@ -966,13 +956,17 @@ class _CatalogScreenState extends State<CatalogScreen> {
                           backgroundColor: addedCount > 0 ? Colors.green : Colors.orange,
                         ),
                       );
-
-                      // Опционально: переключить на вкладку заказов, чтобы пользователь сразу увидел результат
-                      // mainScreenTabNotifier.value = 2; // Раскомментируйте, если хотите автоматический переход
-                    }
+                      // 1. Переключаем вкладку на "Заказы" в фоне
+                        mainScreenTabNotifier.value = 2;
+                        // 2. Открываем окно редактирования
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(builder: (context) => const OrderEditScreen()),
+                        );
+                      }
                   },
                   icon: const Icon(Icons.check),
-                  label: Text(widget.isOrderSelectionMode ? 'Добавить (${_selectedIds.length})' : 'В заказ (${_selectedIds.length})'),
+                  label: Text(widget.isOrderSelectionMode ? 'Добавить (${_selectedIds.length})' : 'Новый заказ (${_selectedIds.length})'),
                   backgroundColor: widget.isOrderSelectionMode ? Colors.green.shade600 : Colors.orange.shade800,
                   foregroundColor: Colors.white,
                 ),
@@ -1005,7 +999,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
     );
   }
 
-  Widget _buildProductCard(Product product, List<CalcItem> calcItems, bool isHectareMode) {
+  Widget _buildProductCard(Product product, List<CalcItem> calcItems) {
     String consumptionWithUnit = _formatConsumptionRate(product.consumptionRate, product.package);
 
     CalcItem? calcItem;
@@ -1013,14 +1007,69 @@ class _CatalogScreenState extends State<CatalogScreen> {
       calcItem = calcItems.firstWhere((item) => item.productId == product.id);
     } catch (_) {}
 
-    // Рассчитываем эффективную цену (за упаковку или за га)
-    double? effectiveBasePrice;
-    double? effectiveFinalPrice;
-    
-    if (calcItem != null && product.price != null) {
-      // getEffectiveBasePrice теперь принимает обычный bool
-      effectiveBasePrice = calcItem.getEffectiveBasePrice(isHectareMode);
-      effectiveFinalPrice = calcItem.finalPrice;
+    // Определяем единицу для отображения (л или кг)
+    String unitStr = 'л';
+    if (product.package != null && product.package!.toLowerCase().contains('кг')) {
+      unitStr = 'кг';
+    }
+
+    final isInCalc = calcItem != null;
+
+    // Виджет с ценами (выносим отдельно для чистоты)
+    Widget? priceWidget;
+    if (product.price != null) {
+      if (isInCalc && calcItem.finalPrice != null) {
+        // Если есть скидка в калькуляторе
+        priceWidget = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Text('${product.price!.toStringAsFixed(2)} ₽/$unitStr', 
+                  style: const TextStyle(decoration: TextDecoration.lineThrough, color: Colors.grey, fontSize: 13)),
+                const SizedBox(width: 4),
+                Text('- ${calcItem.percent!.toStringAsFixed(0)}%', 
+                  style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 13)),
+                const SizedBox(width: 4),
+                Text('= ${calcItem.finalPrice!.toStringAsFixed(2)} ₽/$unitStr', 
+                  style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 15)),
+              ],
+            ),
+            const SizedBox(height: 2),
+            // Цена за гектар (только если в калькуляторе)
+            Wrap(
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Text('(${(calcItem.basePrice * calcItem.rate).toStringAsFixed(2)} ₽/га)', 
+                  style: const TextStyle(decoration: TextDecoration.lineThrough, color: Colors.grey, fontSize: 12)),
+                const SizedBox(width: 4),
+                Text('- ${calcItem.percent!.toStringAsFixed(0)}%', 
+                  style: const TextStyle(color: Colors.red, fontSize: 12)),
+                const SizedBox(width: 4),
+                Text('= ${(calcItem.finalPrice! * calcItem.rate).toStringAsFixed(2)} ₽/га', 
+                  style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 13)),
+              ],
+            ),
+          ],
+        );
+      } else if (isInCalc) {
+        // В калькуляторе, но без скидки
+        priceWidget = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('${product.price!.toStringAsFixed(2)} ₽/$unitStr', 
+              style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 15)),
+            const SizedBox(height: 2),
+            Text('(${(calcItem.basePrice * calcItem.rate).toStringAsFixed(2)} ₽/га)', 
+              style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.green, fontSize: 13)),
+          ],
+        );
+      } else {
+        // Не в калькуляторе
+        priceWidget = Text('${product.price!.toStringAsFixed(2)} ₽/$unitStr', 
+          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 15));
+      }
     }
 
     return Dismissible(
@@ -1049,7 +1098,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
       onDismissed: (direction) async {
         if (product.id != null) {
           await DatabaseHelper.instance.deleteProduct(product.id!);
-          _loadData(); // <-- Вместо setState(()
+          _loadData();
         }
       },
       child: Card(
@@ -1057,156 +1106,104 @@ class _CatalogScreenState extends State<CatalogScreen> {
         elevation: 2,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         child: InkWell(
-          // Клик по карточке переключает выбор ТОЛЬКО в Фазе 1
           onTap: (_isSelectionMode && !_isSelectionConfirmed) 
               ? () => _toggleSelection(product.id!) 
               : null, 
           child: ExpansionTile(
-            // Блокируем раскрытие карточки, если мы в режиме выбора
             onExpansionChanged: _isSelectionMode ? (_) {} : null,
+            // Заголовок с названием
+                        // Заголовок с названием и кнопками в правом верхнем углу
             title: Row(
+              crossAxisAlignment: CrossAxisAlignment.start, // Выравниваем по верхнему краю, если текст длинный
               children: [
-                // Чекбокс показываем только в режиме выбора
                 if (_isSelectionMode)
                   Checkbox(
                     value: _selectedIds.contains(product.id),
-                    // В Фазе 2 чекбокс неактивен (или скрыт), чтобы нельзя было снять выбор
                     onChanged: _isSelectionConfirmed 
                         ? null 
                         : (_) => _toggleSelection(product.id!),
                   ),
+                
+                // Название (растягивается и переносит текст)
                 Expanded(
-                  child: Text(
-                    product.name, 
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)
-                  )
-                ),
-                if (calcItem != null)
-                  IconButton(
-                    icon: Icon(
-                      isHectareMode ? Icons.grass : Icons.inventory_2,
-                      color: Colors.green,
-                      size: 20,
+                  child: Padding(
+                    padding: const EdgeInsets.only(top: 8.0), // Чуть опускаем текст, чтобы выровнять с иконками
+                    child: Text(
+                      product.name, 
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                      softWrap: true, // Разрешаем перенос строк
                     ),
-                    onPressed: () {
-                      CalculatorManager.instance.toggleMode(!isHectareMode);
-                    },
-                    tooltip: isHectareMode ? 'Режим: За гектар' : 'Режим: За упаковку',
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                    splashRadius: 20,
                   ),
+                ),
+                
+                // Кнопки действий (показываем только если не в режиме выбора)
+                if (!_isSelectionMode) ...[
+                  IconButton(
+                    icon: Icon(isInCalc ? Icons.remove_shopping_cart : Icons.calculate, size: 22),
+                    color: isInCalc ? Colors.red.shade700 : Colors.grey.shade700,
+                    onPressed: () {
+                      if (!isInCalc) {
+                        final added = CalculatorManager.instance.addProduct(product);
+                        if (!added) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Достигнут лимит (50) или нет цены.')));
+                      } else {
+                        CalculatorManager.instance.removeItem(product.id!);
+                      }
+                    },
+                    tooltip: isInCalc ? 'Убрать из калькулятора' : 'В калькулятор',
+                    padding: EdgeInsets.zero,
+                    // Жестко фиксируем размер кнопки
+                    constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.edit, size: 22),
+                    color: Colors.blue.shade700,
+                    onPressed: () async {
+                      final result = await Navigator.push(context, MaterialPageRoute(builder: (context) => ProductFormScreen(product: product)));
+                      if (result == true) _loadData();
+                    },
+                    tooltip: 'Редактировать',
+                    padding: EdgeInsets.zero,
+                    // Жестко фиксируем размер кнопки
+                    constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ],
               ],
             ),
+            
+            // Подзаголовок (категория и цены)
             subtitle: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const SizedBox(height: 4),
-                _buildInfoRow('Категория', product.category),
-                
-                if (product.price != null)
-                  // Отображение цены с учетом режима калькулятора
-                  effectiveFinalPrice != null
-                      ? Wrap(
-                          spacing: 8,
-                          runSpacing: 4,
-                          crossAxisAlignment: WrapCrossAlignment.center,
-                          children: [
-                            Text('Цена: ${effectiveBasePrice!.toStringAsFixed(2)} ₽${isHectareMode ? "/га" : ""}',
-                              style: const TextStyle(decoration: TextDecoration.lineThrough, color: Colors.grey, fontSize: 13),
-                            ),
-                            Text('${effectiveFinalPrice.toStringAsFixed(2)} ₽${isHectareMode ? "/га" : ""}',
-                              style: TextStyle(fontWeight: FontWeight.bold, color: Colors.green.shade700, fontSize: 14),
-                            ),
-                            Text('(-${calcItem!.percent!.toStringAsFixed(1)}%)',
-                              style: const TextStyle(color: Colors.red, fontSize: 12, fontWeight: FontWeight.bold),
-                            ),
-                          ],
-                        )
-                      : _buildInfoRow('Цена', '${product.price!.toStringAsFixed(2)} ₽', isPrice: true),
+                Text(product.category, style: TextStyle(color: Colors.grey.shade700, fontSize: 13)),
+                if (priceWidget != null) ...[
+                  const SizedBox(height: 6),
+                  priceWidget, // Оставляем только виджет с ценами, без кнопок
+                ],
               ],
             ),
             trailing: _isSelectionMode ? null : const Icon(Icons.keyboard_arrow_down),
+            
+            // Детали препарата при разворачивании (без кнопок)
             children: _isSelectionMode ? [] : [
               Padding(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    const Divider(),
                     if (product.composition != null && product.composition!.isNotEmpty) _buildDetailRow('Состав', product.composition!),
                     if (product.manufacturer != null && product.manufacturer!.isNotEmpty) _buildDetailRow('Производитель', product.manufacturer!),
                     if (product.package != null && product.package!.isNotEmpty) _buildDetailRow('Упаковка', product.package!),
                     if (consumptionWithUnit.isNotEmpty) _buildDetailRow('Норма расхода', consumptionWithUnit),
                     if (product.description != null && product.description!.isNotEmpty) _buildDetailRow('Описание', product.description!),
                     
-                    // ИСПРАВЛЕНИЕ: проверяем на isNotEmpty и склеиваем через join
                     if (product.cultures.isNotEmpty) 
                       _buildDetailRow('Культуры', product.cultures.join(', ')),
                     if (product.diseases.isNotEmpty) 
                       _buildDetailRow('Болезни', product.diseases.join(', ')),
-                    
-                    if (isHectareMode && calcItem != null)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 8, bottom: 4),
-                        child: Text('Норма расхода в калькуляторе: ${calcItem.rate.toStringAsFixed(2)} на га', style: const TextStyle(color: Colors.grey, fontStyle: FontStyle.italic)),
-                      ),
-
-                    const SizedBox(height: 8),
-                    
-                    // Блок с итоговой ценой внизу
-                    if (effectiveFinalPrice != null)
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(color: Colors.green.shade50, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.green.shade200)),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text('${effectiveBasePrice!.toStringAsFixed(2)} ₽${isHectareMode ? "/га" : ""}', style: const TextStyle(decoration: TextDecoration.lineThrough, color: Colors.grey)),
-                            const SizedBox(width: 8),
-                            Text('${effectiveFinalPrice.toStringAsFixed(2)} ₽${isHectareMode ? "/га" : ""}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.green)),
-                            const SizedBox(width: 8),
-                            Text('(-${calcItem!.percent!.toStringAsFixed(1)}%)', style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold)),
-                          ],
-                        ),
-                      )
-                    else if (product.price != null)
-                      Container(
-                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                         decoration: BoxDecoration(color: Colors.green.shade50, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.green.shade200)),
-                         child: Text('Цена: ${product.price!.toStringAsFixed(2)} ₽', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.green)),
-                      ),
-
-                    const SizedBox(height: 8),
-                    
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 4,
-                      alignment: WrapAlignment.end,
-                      children: [
-                        TextButton.icon(
-                          icon: Icon(calcItem == null ? Icons.calculate : Icons.remove_shopping_cart),
-                          label: Text(calcItem == null ? 'В калькулятор' : 'Убрать'),
-                          style: TextButton.styleFrom(foregroundColor: calcItem == null ? Colors.grey.shade700 : Colors.red.shade700),
-                          onPressed: () {
-                            if (calcItem == null) {
-                              final added = CalculatorManager.instance.addProduct(product);
-                              if (!added) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Достигнут лимит (10) или нет цены.')));
-                            } else {
-                              CalculatorManager.instance.removeItem(product.id!);
-                            }
-                          },
-                        ),
-                        const SizedBox(width: 8),
-                        TextButton.icon(
-                          icon: const Icon(Icons.edit),
-                          label: const Text('Ред.'),
-                          onPressed: () async {
-                            final result = await Navigator.push(context, MaterialPageRoute(builder: (context) => ProductFormScreen(product: product)));
-                            if (result == true) _loadData();
-                          },
-                        ),
-                      ],
-                    ),
                   ],
                 ),
               ),
