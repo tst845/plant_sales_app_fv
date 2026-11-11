@@ -144,6 +144,22 @@ class CalculatorManager {
     _updateCalculations(productId, finalPrice: f);
   }
 
+  void updateVolume(int productId, String val) {
+    final v = double.tryParse(val.replaceAll(',', '.'));
+    if (v == null) return;
+    
+    final list = items.value.map((e) {
+      if (e.productId == productId) {
+        // Защита от деления на ноль, если норма ещё не введена
+        if (e.rate > 0) {
+          e.area = v / e.rate;
+        }
+      }
+      return e;
+    }).toList();
+    items.value = [...list];
+  }
+
   void _updateCalculations(int productId, {double? percent, double? rub, double? finalPrice}) {
     final list = items.value.map((e) {
       if (e.productId == productId) {

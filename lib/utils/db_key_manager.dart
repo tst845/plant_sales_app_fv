@@ -3,7 +3,8 @@ import 'dart:math';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 class DbKeyManager {
-  static const _storage = FlutterSecureStorage();
+  // Убрали aOptions, так как в новой версии шифрование работает по умолчанию
+  static final _storage = const FlutterSecureStorage();
   static const _keyName = 'plant_sales_db_key';
 
   /// Возвращает существующий ключ или генерирует новый 256-битный ключ

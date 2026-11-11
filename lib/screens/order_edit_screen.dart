@@ -464,6 +464,8 @@ class _OrderItemCard extends StatefulWidget {
 class _OrderItemCardState extends State<_OrderItemCard> {
   late TextEditingController _areaCtrl;
   late TextEditingController _rateCtrl;
+  late TextEditingController _volumeCtrl;
+  final FocusNode _volumeFocus = FocusNode();
   
   final FocusNode _areaFocus = FocusNode();
   final FocusNode _rateFocus = FocusNode();
@@ -475,6 +477,7 @@ class _OrderItemCardState extends State<_OrderItemCard> {
     super.initState();
     _areaCtrl = TextEditingController(text: widget.item.area.toString().replaceAll('.', ','));
     _rateCtrl = TextEditingController(text: widget.item.rate.toString().replaceAll('.', ','));
+    _volumeCtrl = TextEditingController(text: widget.item.requiredVolume.toString().replaceAll('.', ','));
     _discountCtrl = TextEditingController(text: widget.item.discountPercent.toString().replaceAll('.', ','));
   }
   
@@ -490,6 +493,9 @@ class _OrderItemCardState extends State<_OrderItemCard> {
     if (!_discountFocus.hasFocus) {
       _discountCtrl.text = widget.item.discountPercent.toString().replaceAll('.', ',');
     }
+    if (!_volumeFocus.hasFocus) {
+      _volumeCtrl.text = widget.item.requiredVolume.toString().replaceAll('.', ',');
+    }
   }
 
   @override
@@ -500,6 +506,8 @@ class _OrderItemCardState extends State<_OrderItemCard> {
     _rateFocus.dispose();
     _discountCtrl.dispose();
     _discountFocus.dispose();
+    _volumeCtrl.dispose();
+    _volumeFocus.dispose();
     super.dispose();
   }
 
@@ -547,7 +555,7 @@ class _OrderItemCardState extends State<_OrderItemCard> {
                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                     onChanged: (val) {
                       final newArea = double.tryParse(val.replaceAll(',', '.')) ?? 0.0;
-                      widget.onChanged(widget.item.copyWith(area: newArea)); // ИСПОЛЬЗУЕМ copyWith
+                      widget.onChanged(widget.item.copyWith(area: newArea));
                     },
                   ),
                 ),
@@ -564,6 +572,23 @@ class _OrderItemCardState extends State<_OrderItemCard> {
                     },
                   ),
                 ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextFormField(
+                    controller: _volumeCtrl,
+                    focusNode: _volumeFocus,
+                    decoration: InputDecoration(labelText: 'Требуется, ${widget.item.packageUnit}', isDense: true, border: const OutlineInputBorder()),
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    onChanged: (val) {
+                      final newVolume = double.tryParse(val.replaceAll(',', '.')) ?? 0.0;
+                      // Пересчитываем площадь: area = volume / rate
+                      if (widget.item.rate > 0) {
+                        final newArea = newVolume / widget.item.rate;
+                        widget.onChanged(widget.item.copyWith(area: newArea));
+                      }
+                    },
+                  ),
+                ),
               ],
             ),
             const SizedBox(height: 12),
@@ -571,7 +596,7 @@ class _OrderItemCardState extends State<_OrderItemCard> {
             Row(
               children: [
                 Expanded(
-                  flex: 1,
+                  flex: 2,
                   child: TextFormField(
                     controller: _discountCtrl,
                     focusNode: _discountFocus,
@@ -583,32 +608,28 @@ class _OrderItemCardState extends State<_OrderItemCard> {
                     },
                   ),
                 ),
-                const Spacer(flex: 2), // Занимает пустое место справа
+                const SizedBox(width: 8),
+                // Блок со стоимостью
+                Expanded(
+                  flex: 2,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.green.shade50,
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: Colors.green.shade200),
+                    ),
+                    child: Center(
+                      child: Text(
+                        '${totalCost.toStringAsFixed(2)} ₽',
+                        style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 16),
+                      ),
+                    ),
+                  ),
+                ),
               ],
             ),
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(color: Colors.grey.shade50, borderRadius: BorderRadius.circular(8), border: Border.all(color: Colors.grey.shade300)),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('Требуется:', style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
-                      Text('${requiredVolume.toStringAsFixed(2)} ${widget.item.packageUnit}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                      ],
-                  ),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Text('Стоимость:', style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
-                      Text('${totalCost.toStringAsFixed(2)} ₽', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.green)),
-                    ],
-                  ),
-                ],
-              ),
-            ),
+           
           ],
         ),
       ),

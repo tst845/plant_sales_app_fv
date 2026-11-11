@@ -6,6 +6,10 @@ import 'order_manager.dart';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:excel/excel.dart' hide Border;
+import 'dart:io';
+import 'package:flutter/services.dart'; // Для HapticFeedback
+import 'package:share_plus/share_plus.dart';
+import 'package:path_provider/path_provider.dart';
 
 class OrdersScreen extends StatefulWidget {
   const OrdersScreen({super.key});
@@ -211,158 +215,289 @@ class _OrdersScreenState extends State<OrdersScreen> {
       ),
     );
   }
+  // Генерация байтов Excel (для отправки и сохранения)
+  Uint8List _generateOrderExcelBytes(Order order) {
+    final excel = Excel.createExcel();
+    final Sheet sheet = excel['Заказ'];
+    if (excel.sheets.containsKey('Sheet1')) excel.delete('Sheet1');
 
-  Widget _buildOrderCard(Order order, Order? activeOrder) {
+    final dateStr = '${order.orderDate.day}.${order.orderDate.month}.${order.orderDate.year}';
+    sheet.appendRow([TextCellValue('Заказ №${order.id ?? "Черновик"}')]);
+    sheet.appendRow([TextCellValue('Клиент:'), TextCellValue(order.clientName)]);
+    sheet.appendRow([TextCellValue('Дата:'), TextCellValue(dateStr), TextCellValue('Статус:'), TextCellValue(order.status)]);
+    sheet.appendRow([TextCellValue('')]); 
+
+    sheet.appendRow([
+      TextCellValue('Наименование'), TextCellValue('Цена (базовая)'), TextCellValue('Скидка, %'),
+      TextCellValue('Цена со скидкой'), TextCellValue('Норма расхода'), TextCellValue('Площадь, га'),
+      TextCellValue('Требуемый объем'), TextCellValue('Стоимость')
+    ]);
+
+    for (var item in order.items) {
+      sheet.appendRow([
+        TextCellValue(item.productName), DoubleCellValue(item.basePrice), DoubleCellValue(item.discountPercent),
+        DoubleCellValue(item.discountedPrice), DoubleCellValue(item.rate), DoubleCellValue(item.area),
+        TextCellValue('${item.requiredVolume.toStringAsFixed(2)} ${item.packageUnit}'), DoubleCellValue(item.totalPrice)
+      ]);
+    }
+
+    List<CellValue?> totalRow = [TextCellValue(''), TextCellValue(''), TextCellValue(''), TextCellValue(''), TextCellValue(''), TextCellValue(''), TextCellValue('')];
+    totalRow.add(DoubleCellValue(order.totalAmount)); 
+    sheet.appendRow(totalRow);
+
+    final bytes = excel.save();
+    if (bytes == null) throw Exception('Ошибка генерации файла');
+    return Uint8List.fromList(bytes);
+  }
+
+  // Отправка в мессенджер
+  Future<void> _shareOrderToMessenger(Order order) async {
+    try {
+      final bytes = _generateOrderExcelBytes(order);
+      final tempDir = await getTemporaryDirectory();
+      final dateStr = '${order.orderDate.day}.${order.orderDate.month}.${order.orderDate.year}';
+      final file = File('${tempDir.path}/Заказ_${order.id}_$dateStr.xlsx');
+      await file.writeAsBytes(bytes);
+
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path)],
+          text: 'Заказ №${order.id} для ${order.clientName}',
+        ),
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка при отправке: $e')));
+      }
+    }
+  }
+
+  void _showOrderActions(BuildContext context, Order order) {
+    final isDraft = order.id == null;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent, // Прозрачный фон для красивого скругления
+      builder: (ctx) {
+        return Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 16),
+          child: SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Действия с заказом${isDraft ? " (Черновик)" : ""}',
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.grey),
+                ),
+                const SizedBox(height: 16),
+                // Горизонтально прокручиваемый список кнопок
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      if (!isDraft) ...[
+                        _buildActionButton(
+                          icon: Icons.download,
+                          label: 'Скачать Excel',
+                          color: Colors.blue,
+                          onTap: () {
+                            Navigator.pop(ctx); // Закрываем шторку
+                            _exportOrderToExcel(order);
+                          },
+                        ),
+                        const SizedBox(width: 16),
+                        _buildActionButton(
+                          icon: Icons.share,
+                          label: 'Отправить в мессенджер',
+                          color: Colors.green,
+                          onTap: () {
+                            Navigator.pop(ctx); // Закрываем шторку
+                            _shareOrderToMessenger(order);
+                          },
+                        ),
+                        const SizedBox(width: 16),
+                      ],
+                      _buildActionButton(
+                        icon: Icons.edit,
+                        label: 'Редактировать',
+                        color: Colors.orange,
+                        onTap: () async {
+                          Navigator.pop(ctx); // Закрываем шторку
+                          
+                          OrderManager.instance.setActiveOrder(order);
+                          final res = await Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => OrderEditScreen(order: isDraft ? null : order),
+                            ),
+                          );
+                          if (res == true) _loadOrders();
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildActionButton({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        width: 100, // Фиксированная ширина для аккуратности
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Column(
+          children: [
+            CircleAvatar(
+              radius: 24,
+              backgroundColor: color.withValues(alpha: 0.1),
+              child: Icon(icon, color: color, size: 28),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+    Widget _buildOrderCard(Order order, Order? activeOrder) {
     final bool isDraft = order.id == null;
     final bool isActive = activeOrder != null && activeOrder.id == order.id;
     final bool highlight = isDraft || isActive;
 
     final dateStr = '${order.orderDate.day}.${order.orderDate.month}.${order.orderDate.year}';
 
-    return Dismissible(
-      key: Key('order_${order.id ?? 'draft'}'),
-      direction: DismissDirection.endToStart,
-      background: Container(
-        margin: const EdgeInsets.only(bottom: 8),
-        decoration: BoxDecoration(color: Colors.red.shade400, borderRadius: BorderRadius.circular(12)),
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.only(right: 20),
-        child: const Icon(Icons.delete_forever, color: Colors.white, size: 32),
-      ),
-      confirmDismiss: (direction) async {
-        return await showDialog<bool>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: const Text('Удаление заказа'),
-            content: Text(isDraft ? 'Удалить черновик?' : 'Вы уверены, что хотите удалить заказ №${order.id}?'),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(ctx, true), 
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
-                child: const Text('Удалить')
-              ),
-            ],
-          ),
-        );
+    return InkWell(
+      // Обработка долгого нажатия
+      onLongPress: () {
+        HapticFeedback.vibrate(); // Легкая вибрация
+        _showOrderActions(context, order);
       },
-      onDismissed: (direction) async {
-        if (isDraft) {
-          OrderManager.instance.clearActiveOrder();
-        } else {
-          await DatabaseHelper.instance.deleteOrder(order.id!);
-        }
-        _loadOrders();
-      },
-      child: Card(
-        margin: const EdgeInsets.only(bottom: 8),
-        color: highlight ? Colors.blue.shade50 : null,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-          side: highlight ? BorderSide(color: Colors.blue.shade300, width: 1.5) : BorderSide.none,
+      borderRadius: BorderRadius.circular(12),
+      child: Dismissible(
+        key: Key('order_${order.id ?? 'draft'}'),
+        direction: DismissDirection.endToStart,
+        background: Container(
+          margin: const EdgeInsets.only(bottom: 8),
+          decoration: BoxDecoration(color: Colors.red.shade400, borderRadius: BorderRadius.circular(12)),
+          alignment: Alignment.centerRight,
+          padding: const EdgeInsets.only(right: 20),
+          child: const Icon(Icons.delete_forever, color: Colors.white, size: 32),
         ),
-        child: ExpansionTile(
-          leading: CircleAvatar(
-            backgroundColor: isDraft ? Colors.blue : _getStatusColor(order.status),
-            child: Icon(isDraft ? Icons.edit_document : _getStatusIcon(order.status), color: Colors.white),
-          ),
-                    // Заголовок с именем клиента и кнопками в правом верхнем углу
-          title: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Имя клиента (растягивается и переносит текст)
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.only(top: 8.0),
-                  child: Text(
-                    isDraft
-                        ? 'Черновик (${order.clientName.isEmpty ? "Без имени" : order.clientName})'
-                        : order.clientName,
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: isDraft ? Colors.blue.shade900 : null,
-                    ),
-                    softWrap: true,
-                  ),
+        confirmDismiss: (direction) async {
+          return await showDialog<bool>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Text('Удаление заказа'),
+              content: Text(isDraft ? 'Удалить черновик?' : 'Вы уверены, что хотите удалить заказ №${order.id}?'),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+                ElevatedButton(
+                  onPressed: () => Navigator.pop(ctx, true), 
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
+                  child: const Text('Удалить')
                 ),
-              ),
-              
-              // Кнопки действий (Экспорт и Редактирование)
-              IconButton(
-                icon: const Icon(Icons.download, color: Colors.blue, size: 22),
-                tooltip: 'Экспорт в Excel',
-                onPressed: () => _exportOrderToExcel(order),
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
-                visualDensity: VisualDensity.compact,
-              ),
-              IconButton(
-                icon: const Icon(Icons.edit, color: Colors.blueGrey, size: 22),
-                tooltip: 'Редактировать',
-                onPressed: () async {
-                  OrderManager.instance.setActiveOrder(order);
-                  final res = await Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => OrderEditScreen(order: isDraft ? null : order),
-                    ),
-                  );
-                  if (res == true) _loadOrders();
-                },
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
-                visualDensity: VisualDensity.compact,
-              ),
-            ],
+              ],
+            ),
+          );
+        },
+        onDismissed: (direction) async {
+          if (isDraft) {
+            OrderManager.instance.clearActiveOrder();
+          } else {
+            await DatabaseHelper.instance.deleteOrder(order.id!);
+          }
+          _loadOrders();
+        },
+        child: Card(
+          margin: const EdgeInsets.only(bottom: 8),
+          color: highlight ? Colors.blue.shade50 : null,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: highlight ? BorderSide(color: Colors.blue.shade300, width: 1.5) : BorderSide.none,
           ),
-          
-          // Подзаголовок (дата и кол-во позиций)
-          subtitle: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('от $dateStr'),
-              Text('Позиций: ${order.items.length}'),
-            ],
-          ),
-          
-          children: [
-            const Divider(height: 1),
-            if (order.items.isEmpty)
-              const Padding(
-                padding: EdgeInsets.all(16.0),
-                child: Text('Заказ пуст'),
-              )
-            else
-              ...order.items.map((item) => ListTile(
-                    dense: true,
-                    title: Text(item.productName),
-                    subtitle: Text(
-                      'Норма: ${item.rate} ${item.packageUnit}/га | Требуется: ${item.requiredVolume.toStringAsFixed(2)} ${item.packageUnit}',
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                    trailing: Text(
-                      '${item.totalPrice.toStringAsFixed(2)} ₽',
-                      style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green),
-                    ),
-                  )),
-            // Итоговая сумма вынесена в самый низ
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  Text(
-                    'Итого: ${order.totalAmount.toStringAsFixed(2)} ₽',
-                    style: const TextStyle(
-                      fontWeight: FontWeight.bold, 
-                      fontSize: 16, 
-                      color: Colors.green,
-                    ),
-                  ),
-                ],
+          child: ExpansionTile(
+            leading: CircleAvatar(
+              backgroundColor: isDraft ? Colors.blue : _getStatusColor(order.status),
+              child: Icon(isDraft ? Icons.edit_document : _getStatusIcon(order.status), color: Colors.white),
+            ),
+            // Заголовок теперь содержит только имя (без кнопок)
+            title: Padding(
+              padding: const EdgeInsets.only(top: 8.0),
+              child: Text(
+                isDraft
+                    ? 'Черновик (${order.clientName.isEmpty ? "Без имени" : order.clientName})'
+                    : order.clientName,
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: isDraft ? Colors.blue.shade900 : null,
+                ),
+                softWrap: true,
               ),
             ),
-          ],
+            subtitle: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('от $dateStr'),
+                Text('Позиций: ${order.items.length}'),
+              ],
+            ),
+            children: [
+              const Divider(height: 1),
+              if (order.items.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(16.0),
+                  child: Text('Заказ пуст'),
+                )
+              else
+                ...order.items.map((item) => ListTile(
+                      dense: true,
+                      title: Text(item.productName),
+                      subtitle: Text(
+                        'Норма: ${item.rate} ${item.packageUnit}/га | Требуется: ${item.requiredVolume.toStringAsFixed(2)} ${item.packageUnit}',
+                        style: const TextStyle(fontSize: 12),
+                      ),
+                      trailing: Text(
+                        '${item.totalPrice.toStringAsFixed(2)} ₽',
+                        style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green),
+                      ),
+                    )),
+              // Итоговая сумма
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    Text(
+                      'Итого: ${order.totalAmount.toStringAsFixed(2)} ₽',
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.green),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

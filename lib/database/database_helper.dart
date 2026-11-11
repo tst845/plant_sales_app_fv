@@ -1,5 +1,4 @@
 // lib/database/database_helper.dart
-import 'dart:io';
 import 'package:sqflite_sqlcipher/sqflite.dart'; 
 import '../utils/db_key_manager.dart';
 import 'package:path/path.dart';
@@ -24,77 +23,26 @@ class DatabaseHelper {
 
   Future<Database> _initDatabase() async {
     final dbPath = join(await getDatabasesPath(), 'plant_sales.db');
-    final oldDbPath = join(await getDatabasesPath(), 'plant_sales_old.db');
-
-    // 1. Получаем или генерируем пароль
+    
+    // Получаем или генерируем пароль для шифрования
     final password = await DbKeyManager.obtainOrCreateKey();
 
-    // 2. Проверяем, нужна ли миграция (существует ли старый незашифрованный файл)
-    final oldFile = File(dbPath);
-    final isMigrationNeeded = await oldFile.exists() && !await File('$dbPath.enc').exists();
-
-    if (isMigrationNeeded) {
-      // Переименовываем старый файл, чтобы освободить имя для нового
-      await oldFile.rename(oldDbPath);
-      try {
-        // Открываем новую зашифрованную БД и переносим данные
-        final newDb = await openDatabase(
-          dbPath,
-          password: password,
-          version: 7, 
-          onCreate: _onCreate,
-          onUpgrade: _onUpgrade,
-          onConfigure: _onConfigure, // <-- ИСПРАВЛЕНО: теперь используется метод класса
-        );
-        await _migrateFromOldDatabase(newDb, oldDbPath);
-        await newDb.close();
-      } catch (e) {
-        // Если миграция не удалась, возвращаем старый файл на место
-        await File(oldDbPath).rename(dbPath);
-        rethrow;
-      }
-      // Удаляем старый файл после успешной миграции
-      await File(oldDbPath).delete();
-    }
-
-    // 3. Открываем (или создаем) зашифрованную БД
+    // Открываем базу как ПЕРВУЮ версию (version: 1)
     return openDatabase(
       dbPath,
       password: password,
-      version: 7,
+      version: 1,
       onCreate: _onCreate,
-      onUpgrade: _onUpgrade,
-      onConfigure: _onConfigure, // <-- ИСПРАВЛЕНО
+      onConfigure: _onConfigure,
     );
   }
-
-     /// Переносит все таблицы и данные из старой БД в новую
-  Future<void> _migrateFromOldDatabase(Database newDb, String oldDbPath) async {
-    // Открываем старую БД БЕЗ пароля
-    final oldDb = await openDatabase(oldDbPath, readOnly: true);
-    try {
-      // Получаем список всех таблиц (кроме системных)
-      final tables = await oldDb.rawQuery(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'android_%'"
-      );
-      for (var table in tables) {
-        final tableName = table['name'] as String;
-        final rows = await oldDb.query(tableName);
-        for (var row in rows) {
-          await newDb.insert(tableName, row, conflictAlgorithm: ConflictAlgorithm.replace);
-        }
-      }
-    } finally {
-      await oldDb.close();
-    }
-  }
-
 
   // ВКЛЮЧАЕМ ПОДДЕРЖКУ ВНЕШНИХ КЛЮЧЕЙ (КРИТИЧНО ДЛЯ ЦЕЛОСТНОСТИ)
   Future _onConfigure(Database db) async {
     await db.execute('PRAGMA foreign_keys = ON');
   }
 
+  // СОЗДАНИЕ ТАБЛИЦ С НУЛЯ
   Future _onCreate(Database db, int version) async {
     await db.execute('CREATE TABLE categories (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE)');
     await db.execute('CREATE TABLE manufacturers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE)');
@@ -126,6 +74,7 @@ class DatabaseHelper {
         FOREIGN KEY (culture_id) REFERENCES cultures (id) ON DELETE CASCADE
       )
     ''');
+    
     await db.execute('''
       CREATE TABLE product_diseases(
         product_id INTEGER,
@@ -135,6 +84,7 @@ class DatabaseHelper {
         FOREIGN KEY (disease_id) REFERENCES diseases (id) ON DELETE CASCADE
       )
     ''');
+
     // Таблица заказов (шапка)
     await db.execute('''
       CREATE TABLE orders(
@@ -146,6 +96,7 @@ class DatabaseHelper {
         notes TEXT 
       )
     ''');
+
     // Таблица позиций заказа (тело)
     await db.execute('''
       CREATE TABLE order_items(
@@ -163,71 +114,13 @@ class DatabaseHelper {
       )
     ''');
   
-        // Индексы для ускорения связей и поиска
+    // Индексы для ускорения связей и поиска
     await db.execute('CREATE INDEX idx_products_category ON products(category_id)');
     await db.execute('CREATE INDEX idx_products_manufacturer ON products(manufacturer_id)');
     await db.execute('CREATE INDEX idx_order_items_order ON order_items(order_id)');
     await db.execute('CREATE INDEX idx_order_items_product ON order_items(product_id)');
     await db.execute('CREATE INDEX idx_product_cultures_product ON product_cultures(product_id)');
     await db.execute('CREATE INDEX idx_product_diseases_product ON product_diseases(product_id)');
-  
-  }
-
-  Future _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    if (oldVersion < 5) {
-      await db.execute('ALTER TABLE orders ADD COLUMN notes TEXT');
-      await db.execute('ALTER TABLE order_items RENAME TO order_items_old');
-      await db.execute('''
-        CREATE TABLE order_items(
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          order_id INTEGER NOT NULL,
-          product_id INTEGER,
-          product_name TEXT NOT NULL,
-          quantity REAL NOT NULL,
-          price_per_unit REAL NOT NULL,
-          discount_percent REAL NOT NULL,
-          FOREIGN KEY (order_id) REFERENCES orders (id) ON DELETE CASCADE,
-          FOREIGN KEY (product_id) REFERENCES products (id) ON DELETE SET NULL
-        )
-      ''');
-      await db.execute('''
-        INSERT INTO order_items (id, order_id, product_id, product_name, quantity, price_per_unit, discount_percent)
-        SELECT id, order_id, product_id, product_name, quantity, price_per_unit, discount_percent FROM order_items_old
-      ''');
-      await db.execute('DROP TABLE order_items_old');
-    }
-    if (oldVersion < 7) {
-      // 1. Переименовываем старую таблицу
-      await db.execute('ALTER TABLE order_items RENAME TO order_items_old');
-
-      // 2. Создаем новую таблицу без package_volume
-      await db.execute('''
-        CREATE TABLE order_items(
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          order_id INTEGER NOT NULL,
-          product_id INTEGER,
-          product_name TEXT NOT NULL,
-          base_price REAL NOT NULL,
-          discount_percent REAL NOT NULL,
-          rate REAL NOT NULL,
-          area REAL NOT NULL,
-          package_unit TEXT NOT NULL,
-          FOREIGN KEY (order_id) REFERENCES orders (id) ON DELETE CASCADE,
-          FOREIGN KEY (product_id) REFERENCES products (id) ON DELETE SET NULL
-        )
-      ''');
-
-      // 3. Переносим данные из старой таблицы в новую
-      await db.execute('''
-        INSERT INTO order_items (id, order_id, product_id, product_name, base_price, discount_percent, rate, area, package_unit)
-        SELECT id, order_id, product_id, product_name, base_price, discount_percent, rate, area, package_unit FROM order_items_old
-      ''');
-
-      // 4. Удаляем старую таблицу
-      await db.execute('DROP TABLE order_items_old');
-    }
-  
-   
   }
 
   // ВАЖНО: Используем DatabaseExecutor, чтобы принимать и Database, и Transaction
@@ -271,7 +164,6 @@ class DatabaseHelper {
     return productId;
   }
 
-  // Приватный метод обновления (чтобы можно было вызывать внутри транзакции)
   Future<int> _updateSingleProduct(DatabaseExecutor db, Product product) async {
     int catId = await _getOrCreateId(db, 'categories', product.category);
     int manId = await _getOrCreateId(db, 'manufacturers', product.manufacturer);
@@ -320,7 +212,6 @@ class DatabaseHelper {
   Future<List<Product>> getAllProducts() async {
     Database db = await database;
     
-    // 1. Получаем препараты
     final productMaps = await db.rawQuery('''
       SELECT p.*, c.name as category, m.name as manufacturer 
       FROM products p
@@ -328,7 +219,6 @@ class DatabaseHelper {
       LEFT JOIN manufacturers m ON p.manufacturer_id = m.id
     ''');
 
-    // 2. Получаем ВСЕ связи культур (один запрос)
     final culturesData = await db.rawQuery('''
       SELECT pc.product_id, c.name 
       FROM product_cultures pc
@@ -340,7 +230,6 @@ class DatabaseHelper {
       culturesMap.putIfAbsent(pId, () => []).add(row['name'] as String);
     }
 
-    // 3. Получаем ВСЕ связи болезней (один запрос)
     final diseasesData = await db.rawQuery('''
       SELECT pd.product_id, d.name 
       FROM product_diseases pd
@@ -352,7 +241,6 @@ class DatabaseHelper {
       diseasesMap.putIfAbsent(pId, () => []).add(row['name'] as String);
     }
 
-    // 4. Склеиваем всё в памяти
     List<Product> products = [];
     for (var map in productMaps) {
       int productId = map['id'] as int;
@@ -413,14 +301,12 @@ class DatabaseHelper {
             cultures: product.cultures,
             diseases: product.diseases,
           );
-          await _updateSingleProduct(txn, product); // <-- Исправлено на txn
+          await _updateSingleProduct(txn, product);
         }
       }
     });
   }
 
-
-  // 2. Обновление полей (с учетом новых связей)
   Future<void> batchUpdateProductsByField(Map<String, Map<String, dynamic>> updates) async {
     Database db = await database;
     await db.transaction((txn) async {
@@ -428,7 +314,6 @@ class DatabaseHelper {
         String name = entry.key;
         Map<String, dynamic> fields = entry.value;
         
-        // Извлекаем списки культур и болезней, если они есть в обновлении
         List<String>? newCultures;
         if (fields.containsKey('cultures')) {
           final cultStr = fields.remove('cultures') as String?;
@@ -445,7 +330,6 @@ class DatabaseHelper {
           }
         }
 
-        // Обновляем ID категории и производителя
         if (fields.containsKey('category')) {
            fields['category_id'] = await _getOrCreateId(txn, 'categories', fields['category']);
            fields.remove('category');
@@ -455,15 +339,12 @@ class DatabaseHelper {
            fields.remove('manufacturer');
         }
         
-        // Обновляем саму таблицу products
         await txn.update('products', fields, where: 'name = ?', whereArgs: [name]);
 
-        // Находим ID обновленного препарата
         final res = await txn.query('products', columns: ['id'], where: 'name = ?', whereArgs: [name]);
         if (res.isNotEmpty) {
           int productId = res.first['id'] as int;
 
-          // Обновляем культуры, если они были выбраны для обновления
           if (newCultures != null) {
             await txn.delete('product_cultures', where: 'product_id = ?', whereArgs: [productId]);
             for (var culture in newCultures) {
@@ -472,7 +353,6 @@ class DatabaseHelper {
             }
           }
 
-          // Обновляем болезни, если они были выбраны
           if (newDiseases != null) {
             await txn.delete('product_diseases', where: 'product_id = ?', whereArgs: [productId]);
             for (var disease in newDiseases) {
@@ -489,11 +369,9 @@ class DatabaseHelper {
   // CRUD ДЛЯ ЗАКАЗОВ
   // ==========================================
 
-    // --- СОХРАНЕНИЕ НОВОГО ЗАКАЗА ---
   Future<int> insertOrder(Order order) async {
     Database db = await database;
     return await db.transaction((txn) async {
-      // 1. Сохраняем шапку заказа
       final orderId = await txn.insert('orders', {
         'client_name': order.clientName,
         'order_date': order.orderDate.toIso8601String(),
@@ -502,7 +380,6 @@ class DatabaseHelper {
         'total_amount': order.totalAmount,
       });
       
-      // 2. Сохраняем позиции
       for (var item in order.items) {
         await txn.insert('order_items', {
           'order_id': orderId,
@@ -519,7 +396,6 @@ class DatabaseHelper {
     });
   }
 
-  // --- ОБНОВЛЕНИЕ СУЩЕСТВУЮЩЕГО ЗАКАЗА ---
   Future<void> updateOrder(Order order, {DatabaseExecutor? executor}) async {
     if (executor == null) {
       await (await database).transaction((txn) async {
@@ -554,32 +430,22 @@ class DatabaseHelper {
     }
   }
 
-  // --- УДАЛЕНИЕ ЗАКАЗА ---
   Future<int> deleteOrder(int id) async {
     Database db = await database;
-    // Если в схеме БД настроен ON DELETE CASCADE для order_items, 
-    // то позиции удалятся автоматически. Если нет — удалите их вручную перед удалением шапки.
     return await db.delete('orders', where: 'id = ?', whereArgs: [id]);
   }
 
-  // ПОЛУЧЕНИЕ ВСЕХ ЗАКАЗОВ (Read)
   Future<List<Order>> getAllOrders() async {
     final db = await database;
-    
-    // 1. Получаем все заказы
     final orderMaps = await db.query('orders', orderBy: 'order_date DESC, id DESC'); 
 
-    // 2. Одним запросом получаем ВСЕ позиции для всех заказов
     final itemMaps = await db.query('order_items');
-    
-    // Группируем позиции по order_id
     final Map<int, List<OrderItem>> itemsByOrder = {};
     for (var item in itemMaps) {
       final orderId = item['order_id'] as int;
       itemsByOrder.putIfAbsent(orderId, () => []).add(OrderItem.fromMap(item));
     }
 
-    // 3. Склеиваем
     List<Order> orders = [];
     for (var map in orderMaps) {
       final orderId = map['id'] as int;
@@ -588,7 +454,6 @@ class DatabaseHelper {
     return orders;
   }
 
-  // Вспомогательный метод для получения позиций заказа
   Future<List<OrderItem>> getOrderItems(int orderId) async {
     final db = await database;
     final itemMaps = await db.query(
@@ -603,25 +468,20 @@ class DatabaseHelper {
   // МЕТОДЫ ДЛЯ ИМПОРТА/ЭКСПОРТА ЗАКАЗОВ (BACKUP)
   // ==========================================
 
-  // Очистка всех заказов (для режима "Заменить всё")
   Future<void> deleteAllOrders() async {
     Database db = await database;
     await db.delete('order_items');
     await db.delete('orders');
   }
 
-  // Получить все ID заказов, которые есть в БД
   Future<Set<int>> getAllOrderIds() async {
     final db = await database;
     final rows = await db.query('orders', columns: ['id']);
     return rows.map((r) => r['id'] as int).toSet();
   }
 
-  // Вставка заказа с принудительным ID (для восстановления)
-  
   Future<void> insertOrderWithId(Order order, {DatabaseExecutor? executor}) async {
     DatabaseExecutor db = executor ?? await database;
-    // Если транзакция передана извне, используем её. Если нет - создаем свою (через await database).
     
     if (executor == null) {
       await (await database).transaction((txn) async {
@@ -631,6 +491,7 @@ class DatabaseHelper {
       await _executeInsertOrderWithId(db, order);
     }
   }
+
   Future<void> _executeInsertOrderWithId(DatabaseExecutor db, Order order) async {
     await db.insert('orders', {
       'id': order.id,
@@ -655,17 +516,13 @@ class DatabaseHelper {
     }
   }
 
-
-  // Получить карту всех препаратов (ID -> Product) для быстрого поиска
   Future<Map<int, Product>> getProductsIdMap() async {
     final products = await getAllProducts();
     return {for (var p in products) p.id!: p};
   }
 
-  // Создать "заглушку" препарата, если его нет в БД
-    // ДОБАВИТЬ ВОЗМОЖНОСТЬ ПЕРЕДАВАТЬ ТРАНЗАКЦИЮ (txn)
   Future<int> createStubProduct(String name, {DatabaseExecutor? executor}) async {
-    DatabaseExecutor db = executor ?? await database; // Используем транзакцию, если передана
+    DatabaseExecutor db = executor ?? await database; 
 
     int catId = await _getOrCreateId(db, 'categories', 'Импортированные (без категории)');
     
@@ -678,7 +535,6 @@ class DatabaseHelper {
     });
   }
 
-  // 1. Очистить ТОЛЬКО заказы (каталог остается)
   Future<void> clearOrdersOnly() async {
     Database db = await database;
     await db.transaction((txn) async {
@@ -687,11 +543,9 @@ class DatabaseHelper {
     });
   }
 
-  // 2. Очистить ТОЛЬКО препараты (заказы остаются)
   Future<void> clearProductsOnly() async {
     Database db = await database;
     await db.transaction((txn) async {
-      // ИСПРАВЛЕНИЕ: используем txn вместо db
       await txn.delete('products'); 
       await txn.delete('categories', where: 'id NOT IN (SELECT DISTINCT category_id FROM products WHERE category_id IS NOT NULL)');
       await txn.delete('manufacturers', where: 'id NOT IN (SELECT DISTINCT manufacturer_id FROM products WHERE manufacturer_id IS NOT NULL)');
@@ -700,8 +554,6 @@ class DatabaseHelper {
     });
   }
 
-  // 3. Полный сброс (удаляет ВООБЩЕ всё)
-   // ОБНОВЛЕННАЯ ОЧИСТКА (Сброс автоинкремента)
   Future<void> clearEverything() async {
     Database db = await database;
     await db.transaction((txn) async {
@@ -714,18 +566,19 @@ class DatabaseHelper {
       await txn.delete('manufacturers');
       await txn.delete('cultures');
       await txn.delete('diseases');
-      
-      // СБРОС СЧЕТЧИКОВ ID (чтобы новые данные начинались с ID = 1)
       await txn.delete('sqlite_sequence'); 
     });
   }
 
   Future<void> insertSampleData() async {
     Database db = await database;
-    final count = Sqflite.firstIntValue(await db.rawQuery('SELECT COUNT(*) FROM products'));
-    if (count != null && count > 0) return; // Если уже есть данные, ничего не делаем
+    
+    // Безопасное получение количества (без зависимости от класса Sqflite)
+    final countMap = await db.rawQuery('SELECT COUNT(*) as cnt FROM products');
+    final count = countMap.first['cnt'] as int;
+    
+    if (count > 0) return;
 
-    // Пример препарата
     Product sampleProduct = Product(
       name: 'Абакус Ультра, СЭ',
       category: 'Фунгициды',
@@ -741,16 +594,15 @@ class DatabaseHelper {
     
     await insertProduct(sampleProduct);
 
-    // Пример заказа
     Order sampleOrder = Order(
-      id: 1, // Принудительный ID
+      id: 1,
       clientName: 'Иван Иванов (Пример)',
       orderDate: DateTime.now(),
       status: 'Новый',
       notes: 'Этот заказ создан автоматически для демонстрации.',
       items: [
         OrderItem(
-          productId: 1, // ID только что созданного препарата
+          productId: 1,
           productName: 'Абакус Ультра, СЭ',
           basePrice: 3081.72,
           discountPercent: 5.0,
@@ -763,5 +615,4 @@ class DatabaseHelper {
     
     await insertOrderWithId(sampleOrder);
   }
-
-}// DatabaseHelper 
+}

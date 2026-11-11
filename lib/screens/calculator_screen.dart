@@ -266,8 +266,8 @@ class _CalculatorItemCard extends StatefulWidget {
 }
 
 class _CalculatorItemCardState extends State<_CalculatorItemCard> {
-  late TextEditingController _percentCtrl, _rubCtrl, _finalCtrl, _rateCtrl, _areaCtrl;
-  final FocusNode _percentFocus = FocusNode(), _rubFocus = FocusNode(), _finalFocus = FocusNode(), _rateFocus = FocusNode(), _areaFocus = FocusNode();
+  late TextEditingController _percentCtrl, _rubCtrl, _finalCtrl, _rateCtrl, _areaCtrl, _volumeCtrl;
+  final FocusNode _percentFocus = FocusNode(), _rubFocus = FocusNode(), _finalFocus = FocusNode(), _rateFocus = FocusNode(), _areaFocus = FocusNode(), _volumeFocus = FocusNode();
 
   @override
   void initState() {
@@ -281,6 +281,7 @@ class _CalculatorItemCardState extends State<_CalculatorItemCard> {
     _finalCtrl = TextEditingController(text: _formatVal(widget.item.finalPrice));
     _rateCtrl = TextEditingController(text: _formatVal(widget.item.rate));
     _areaCtrl = TextEditingController(text: _formatVal(widget.item.area));
+    _volumeCtrl = TextEditingController(text: _formatVal(widget.item.requiredVolume));
   }
 
   @override
@@ -291,6 +292,7 @@ class _CalculatorItemCardState extends State<_CalculatorItemCard> {
     if (!_finalFocus.hasFocus) _finalCtrl.text = _formatVal(widget.item.finalPrice);
     if (!_rateFocus.hasFocus) _rateCtrl.text = _formatVal(widget.item.rate);
     if (!_areaFocus.hasFocus) _areaCtrl.text = _formatVal(widget.item.area);
+    if (!_volumeFocus.hasFocus) _volumeCtrl.text = _formatVal(widget.item.requiredVolume);
   }
 
   String _formatVal(double? val) {
@@ -301,8 +303,8 @@ class _CalculatorItemCardState extends State<_CalculatorItemCard> {
 
   @override
   void dispose() {
-    _percentCtrl.dispose(); _rubCtrl.dispose(); _finalCtrl.dispose(); _rateCtrl.dispose(); _areaCtrl.dispose();
-    _percentFocus.dispose(); _rubFocus.dispose(); _finalFocus.dispose(); _rateFocus.dispose(); _areaFocus.dispose();
+    _percentCtrl.dispose(); _rubCtrl.dispose(); _finalCtrl.dispose(); _rateCtrl.dispose(); _areaCtrl.dispose();  _volumeCtrl.dispose();
+    _percentFocus.dispose(); _rubFocus.dispose(); _finalFocus.dispose(); _rateFocus.dispose(); _areaFocus.dispose(); _volumeFocus.dispose();
     super.dispose();
   }
 
@@ -346,7 +348,7 @@ class _CalculatorItemCardState extends State<_CalculatorItemCard> {
                 children: [
                   Text(
                     '${base.toStringAsFixed(2)} ₽/$unit',
-                    style: TextStyle(color: Colors.blueGrey.shade700, fontSize: 16, fontWeight: FontWeight.w600),
+                    style: TextStyle(color: const Color.fromARGB(255, 1, 134, 195), fontSize: 16, fontWeight: FontWeight.w600),
                   ),
                   const Spacer(),
                   IconButton(
@@ -381,7 +383,7 @@ class _CalculatorItemCardState extends State<_CalculatorItemCard> {
 
               const SizedBox(height: 12),
 
-              // СТРОКА 5: Площадь и Норма
+              // СТРОКА 5: Площадь и Норма и Требуется
               Row(
                 children: [
                   Expanded(
@@ -405,6 +407,17 @@ class _CalculatorItemCardState extends State<_CalculatorItemCard> {
                       onChanged: (v) => CalculatorManager.instance.updateRate(widget.item.productId, v),
                     ),
                   ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextField(
+                      controller: _volumeCtrl,
+                      focusNode: _volumeFocus,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))],
+                      decoration: InputDecoration(labelText: 'Требуется, $unit', isDense: true, border: const OutlineInputBorder()),
+                      onChanged: (v) => CalculatorManager.instance.updateVolume(widget.item.productId, v),
+                    ),
+                  ),
                 ],
               ),
 
@@ -414,10 +427,6 @@ class _CalculatorItemCardState extends State<_CalculatorItemCard> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text(
-                    'Требуется: ${widget.item.requiredVolume.toStringAsFixed(2)} $unit',
-                    style: const TextStyle(fontSize: 14, color: Colors.black87),
-                  ),
                   Text(
                     '${widget.item.totalCost.toStringAsFixed(2)} ₽',
                     style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.green),
