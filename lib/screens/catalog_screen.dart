@@ -3,14 +3,15 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:excel/excel.dart' hide Border;
+import 'package:flutter/services.dart';
 import '../database/database_helper.dart';
-import '../models/product.dart';
 import 'product_form_screen.dart';
 import 'calculator_manager.dart';
-import '../services/filter_manager.dart';
-import '../models/order.dart';
 import 'order_manager.dart';
 import 'order_edit_screen.dart';
+import '../services/filter_manager.dart';
+import '../models/product.dart';
+import '../models/order.dart';
 import '../main.dart';
 
 class CatalogFilter {
@@ -1101,113 +1102,111 @@ class _CatalogScreenState extends State<CatalogScreen> {
           _loadData();
         }
       },
-      child: Card(
+      child: Card( 
         margin: const EdgeInsets.only(bottom: 10),
         elevation: 2,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        child: InkWell(
-          onTap: (_isSelectionMode && !_isSelectionConfirmed) 
-              ? () => _toggleSelection(product.id!) 
-              : null, 
-          child: ExpansionTile(
-            onExpansionChanged: _isSelectionMode ? (_) {} : null,
-            // Заголовок с названием
-                        // Заголовок с названием и кнопками в правом верхнем углу
-            title: Row(
-              crossAxisAlignment: CrossAxisAlignment.start, // Выравниваем по верхнему краю, если текст длинный
-              children: [
-                if (_isSelectionMode)
-                  Checkbox(
-                    value: _selectedIds.contains(product.id),
-                    onChanged: _isSelectionConfirmed 
-                        ? null 
-                        : (_) => _toggleSelection(product.id!),
-                  ),
-                
-                // Название (растягивается и переносит текст)
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.only(top: 8.0), // Чуть опускаем текст, чтобы выровнять с иконками
-                    child: Text(
-                      product.name, 
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                      softWrap: true, // Разрешаем перенос строк
+        // Оборачиваем в GestureDetector для долгого нажатия
+        child: GestureDetector(
+          onLongPress: () {
+            HapticFeedback.vibrate(); // Легкая вибрация
+            // Переходим в режим редактирования
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (context) => ProductFormScreen(product: product)),
+            ).then((result) {
+              if (result == true) _loadData();
+            });
+          },
+          child: InkWell(
+            onTap: (_isSelectionMode && !_isSelectionConfirmed) 
+                ? () => _toggleSelection(product.id!) 
+                : null, 
+            child: ExpansionTile(
+              onExpansionChanged: _isSelectionMode ? (_) {} : null,
+              // Заголовок с названием (кнопка редактирования удалена)
+              title: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (_isSelectionMode)
+                    Checkbox(
+                      value: _selectedIds.contains(product.id),
+                      onChanged: _isSelectionConfirmed 
+                          ? null 
+                          : (_) => _toggleSelection(product.id!),
+                    ),
+                  
+                  // Название (растягивается и переносит текст)
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.only(top: 8.0),
+                      child: Text(
+                        product.name, 
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                        softWrap: true,
+                      ),
                     ),
                   ),
-                ),
-                
-                // Кнопки действий (показываем только если не в режиме выбора)
-                if (!_isSelectionMode) ...[
-                  IconButton(
-                    icon: Icon(isInCalc ? Icons.remove_shopping_cart : Icons.calculate, size: 22),
-                    color: isInCalc ? Colors.red.shade700 : Colors.grey.shade700,
-                    onPressed: () {
-                      if (!isInCalc) {
-                        final added = CalculatorManager.instance.addProduct(product);
-                        if (!added) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Достигнут лимит (50) или нет цены.')));
-                      } else {
-                        CalculatorManager.instance.removeItem(product.id!);
-                      }
-                    },
-                    tooltip: isInCalc ? 'Убрать из калькулятора' : 'В калькулятор',
-                    padding: EdgeInsets.zero,
-                    // Жестко фиксируем размер кнопки
-                    constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
-                    visualDensity: VisualDensity.compact,
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.edit, size: 22),
-                    color: Colors.blue.shade700,
-                    onPressed: () async {
-                      final result = await Navigator.push(context, MaterialPageRoute(builder: (context) => ProductFormScreen(product: product)));
-                      if (result == true) _loadData();
-                    },
-                    tooltip: 'Редактировать',
-                    padding: EdgeInsets.zero,
-                    // Жестко фиксируем размер кнопки
-                    constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
-                    visualDensity: VisualDensity.compact,
-                  ),
+                  
+                  // Кнопка "В калькулятор" (остается)
+                  if (!_isSelectionMode)
+                    IconButton(
+                      icon: Icon(isInCalc ? Icons.remove_shopping_cart : Icons.calculate, size: 22),
+                      color: isInCalc ? Colors.red.shade700 : Colors.grey.shade700,
+                      onPressed: () {
+                        if (!isInCalc) {
+                          final added = CalculatorManager.instance.addProduct(product);
+                          if (!added) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Достигнут лимит (50) или нет цены.')));
+                        } else {
+                          CalculatorManager.instance.removeItem(product.id!);
+                        }
+                      },
+                      tooltip: isInCalc ? 'Убрать из калькулятора' : 'В калькулятор',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+                      visualDensity: VisualDensity.compact,
+                    ),
                 ],
-              ],
-            ),
-            
-            // Подзаголовок (категория и цены)
-            subtitle: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const SizedBox(height: 4),
-                Text(product.category, style: TextStyle(color: Colors.grey.shade700, fontSize: 13)),
-                if (priceWidget != null) ...[
-                  const SizedBox(height: 6),
-                  priceWidget, // Оставляем только виджет с ценами, без кнопок
-                ],
-              ],
-            ),
-            trailing: _isSelectionMode ? null : const Icon(Icons.keyboard_arrow_down),
-            
-            // Детали препарата при разворачивании (без кнопок)
-            children: _isSelectionMode ? [] : [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Divider(),
-                    if (product.composition != null && product.composition!.isNotEmpty) _buildDetailRow('Состав', product.composition!),
-                    if (product.manufacturer != null && product.manufacturer!.isNotEmpty) _buildDetailRow('Производитель', product.manufacturer!),
-                    if (product.package != null && product.package!.isNotEmpty) _buildDetailRow('Упаковка', product.package!),
-                    if (consumptionWithUnit.isNotEmpty) _buildDetailRow('Норма расхода', consumptionWithUnit),
-                    if (product.description != null && product.description!.isNotEmpty) _buildDetailRow('Описание', product.description!),
-                    
-                    if (product.cultures.isNotEmpty) 
-                      _buildDetailRow('Культуры', product.cultures.join(', ')),
-                    if (product.diseases.isNotEmpty) 
-                      _buildDetailRow('Болезни', product.diseases.join(', ')),
-                  ],
-                ),
               ),
-            ],
+              
+              // Подзаголовок (категория и цены)
+              subtitle: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: 4),
+                  Text(product.category, style: TextStyle(color: Colors.grey.shade700, fontSize: 13)),
+                  if (priceWidget != null) ...[
+                    const SizedBox(height: 6),
+                    priceWidget,
+                  ],
+                ],
+              ),
+              
+              trailing: _isSelectionMode ? null : const Icon(Icons.keyboard_arrow_down),
+              
+              // Детали препарата при разворачивании
+              children: _isSelectionMode ? [] : [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Divider(),
+                      if (product.composition != null && product.composition!.isNotEmpty) _buildDetailRow('Состав', product.composition!),
+                      if (product.manufacturer != null && product.manufacturer!.isNotEmpty) _buildDetailRow('Производитель', product.manufacturer!),
+                      if (product.package != null && product.package!.isNotEmpty) _buildDetailRow('Упаковка', product.package!),
+                      if (consumptionWithUnit.isNotEmpty) _buildDetailRow('Норма расхода', consumptionWithUnit),
+                      if (product.description != null && product.description!.isNotEmpty) _buildDetailRow('Описание', product.description!),
+                      
+                      if (product.cultures.isNotEmpty) 
+                        _buildDetailRow('Культуры', product.cultures.join(', ')),
+                      if (product.diseases.isNotEmpty) 
+                        _buildDetailRow('Болезни', product.diseases.join(', ')),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

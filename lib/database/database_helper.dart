@@ -5,6 +5,7 @@ import 'package:path/path.dart';
 import 'package:flutter/foundation.dart'; 
 import '../models/product.dart';
 import '../models/order.dart';
+import '../models/editable_dict_item.dart';
 
 class DatabaseHelper {
   DatabaseHelper._privateConstructor();
@@ -615,4 +616,88 @@ class DatabaseHelper {
     
     await insertOrderWithId(sampleOrder);
   }
+
+    // ==========================================
+  // УПРАВЛЕНИЕ СЛОВАРЯМИ
+  // ==========================================
+
+  /// Считает, в скольких препаратах используется запись из словаря.
+  /// [dictType] должен быть 'categories', 'cultures' или 'diseases'
+  Future<int> getDictItemUsage(String dictType, int id) async {
+    final db = await database;
+    int count = 0;
+    
+    if (dictType == 'categories') {
+      final res = await db.rawQuery('SELECT COUNT(*) as cnt FROM products WHERE category_id = ?', [id]);
+      count = res.first['cnt'] as int;
+    } else if (dictType == 'cultures') {
+      final res = await db.rawQuery('SELECT COUNT(*) as cnt FROM product_cultures WHERE culture_id = ?', [id]);
+      count = res.first['cnt'] as int;
+    } else if (dictType == 'diseases') {
+      final res = await db.rawQuery('SELECT COUNT(*) as cnt FROM product_diseases WHERE disease_id = ?', [id]);
+      count = res.first['cnt'] as int;
+    }
+    return count;
+  }
+
+  /// Сохраняет изменения словаря в БД.
+  /// Возвращает список ошибок (если были).
+  Future<List<String>> saveDictChanges(
+    String dictType,
+    List<EditableDictItem> items, // Измененные и удаленные элементы
+  ) async {
+    Database db = await database;
+    List<String> errors = [];
+
+    await db.transaction((txn) async {
+      for (var item in items) {
+        if (item.id == null) continue; // Новые записи мы пока не создаем
+
+        // 1. УДАЛЕНИЕ
+        if (item.isDeleted) {
+          if (dictType == 'categories') {
+            // Для категорий сначала отвязываем препараты (иначе FOREIGN KEY не даст удалить)
+            await txn.update('products', {'category_id': null}, where: 'category_id = ?', whereArgs: [item.id]);
+            await txn.delete('categories', where: 'id = ?', whereArgs: [item.id]);
+          } else if (dictType == 'cultures') {
+            // Для культур работает ON DELETE CASCADE
+            await txn.delete('cultures', where: 'id = ?', whereArgs: [item.id]);
+          } else if (dictType == 'diseases') {
+            await txn.delete('diseases', where: 'id = ?', whereArgs: [item.id]);
+          }
+        }
+        // 2. ПЕРЕИМЕНОВАНИЕ / СЛИЯНИЕ
+        else if (item.isModified) {
+          final newName = item.newName.trim();
+          
+          // Ищем, нет ли уже записи с таким именем (Слияние)
+          final existing = await txn.query(dictType, columns: ['id'], where: 'name = ?', whereArgs: [newName]);
+          
+          if (existing.isNotEmpty) {
+            // СЛИЯНИЕ
+            final targetId = existing.first['id'] as int;
+            
+            if (dictType == 'categories') {
+              // Перепривязываем препараты
+              await txn.update('products', {'category_id': targetId}, where: 'category_id = ?', whereArgs: [item.id]);
+              await txn.delete('categories', where: 'id = ?', whereArgs: [item.id]);
+            } else if (dictType == 'cultures') {
+              // Перепривязываем связи (OR IGNORE защитит от дублей связи)
+              await txn.rawUpdate('UPDATE OR IGNORE product_cultures SET culture_id = ? WHERE culture_id = ?', [targetId, item.id]);
+              await txn.delete('cultures', where: 'id = ?', whereArgs: [item.id]);
+            } else if (dictType == 'diseases') {
+              await txn.rawUpdate('UPDATE OR IGNORE product_diseases SET disease_id = ? WHERE disease_id = ?', [targetId, item.id]);
+              await txn.delete('diseases', where: 'id = ?', whereArgs: [item.id]);
+            }
+          } else {
+            // ПРОСТОЕ ПЕРЕИМЕНОВАНИЕ
+            await txn.update(dictType, {'name': newName}, where: 'id = ?', whereArgs: [item.id]);
+          }
+        }
+      }
+    });
+
+    return errors;
+  }
+
 }

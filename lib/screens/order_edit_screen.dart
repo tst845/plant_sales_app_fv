@@ -72,9 +72,10 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
     super.dispose();
   }
 
-  Future<void> _save() async {
+    Future<void> _save() async {
     if (_clientCtrl.text.trim().isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Укажите имя или компанию')));
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Укажите имя или компанию')));
       return;
     }
 
@@ -96,14 +97,20 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
         await DatabaseHelper.instance.updateOrder(newOrder);
       }
 
+      // обновление списка заказов
+      DatabaseHelper.dbUpdateTrigger.value++;
+
       OrderManager.instance.clearActiveOrder();
       if (OrderManager.instance.isSyncedWithCalculator.value) {
         CalculatorManager.instance.clearAll();
       }
-      
+
       if (mounted) Navigator.pop(context, true);
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка сохранения: $e')));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Ошибка сохранения: $e')));
+      }
     }
   }
 

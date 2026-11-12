@@ -57,4 +57,33 @@ class Product {
       'description': description,
     };
   }
+
+  Product copyWith({
+    int? id,
+    String? name,
+    String? category,
+    String? composition,
+    String? manufacturer,
+    String? package,
+    String? consumptionRate,
+    double? price,
+    String? description,
+    List<String>? cultures,
+    List<String>? diseases,
+  }) {
+    return Product(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      category: category ?? this.category,
+      composition: composition ?? this.composition,
+      manufacturer: manufacturer ?? this.manufacturer,
+      package: package ?? this.package,
+      consumptionRate: consumptionRate ?? this.consumptionRate,
+      price: price ?? this.price,
+      description: description ?? this.description,
+      cultures: cultures ?? this.cultures,
+      diseases: diseases ?? this.diseases,
+    );
+  }
+
 }

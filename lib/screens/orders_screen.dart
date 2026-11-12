@@ -33,6 +33,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
   bool _dateAscending = false;  // true: Старые -> Новые, false: Новые -> Старые
 
   final bool _useDemoData = false; 
+  int? _contextMenuOrderId; // ID заказа, для которого открыто меню
 
   @override
   void initState() {
@@ -274,10 +275,15 @@ class _OrdersScreenState extends State<OrdersScreen> {
 
   void _showOrderActions(BuildContext context, Order order) {
     final isDraft = order.id == null;
+    
+    // Включаем подсветку карточки
+    setState(() {
+      _contextMenuOrderId = order.id; 
+    });
 
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.transparent, // Прозрачный фон для красивого скругления
+      backgroundColor: Colors.transparent,
       builder: (ctx) {
         return Container(
           decoration: const BoxDecoration(
@@ -290,9 +296,14 @@ class _OrdersScreenState extends State<OrdersScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // ИНФОРМАЦИЯ О ЗАКАЗЕ В ЗАГОЛОВКЕ ШТОРКИ
                 Text(
-                  'Действия с заказом${isDraft ? " (Черновик)" : ""}',
-                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.grey),
+                  isDraft ? 'Черновик' : 'Заказ №${order.id}',
+                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.green),
+                ),
+                Text(
+                  order.clientName.isEmpty ? 'Без имени' : order.clientName,
+                  style: const TextStyle(fontSize: 16, color: Colors.grey),
                 ),
                 const SizedBox(height: 16),
                 // Горизонтально прокручиваемый список кнопок
@@ -347,7 +358,14 @@ class _OrdersScreenState extends State<OrdersScreen> {
           ),
         );
       },
-    );
+    ).then((_) {
+      // Этот блок срабатывает, когда шторка полностью закрылась (любым способом)
+      if (mounted) {
+        setState(() {
+          _contextMenuOrderId = null; // Убираем подсветку
+        });
+      }
+    });
   }
 
   Widget _buildActionButton({
@@ -384,7 +402,23 @@ class _OrdersScreenState extends State<OrdersScreen> {
     Widget _buildOrderCard(Order order, Order? activeOrder) {
     final bool isDraft = order.id == null;
     final bool isActive = activeOrder != null && activeOrder.id == order.id;
-    final bool highlight = isDraft || isActive;
+    
+    // Проверяем, открыто ли меню для этого заказа
+    final bool isMenuOpenForThisOrder = _contextMenuOrderId == order.id;
+
+    // Логика подсветки:
+    // 1. Если открыто меню — красим в светло-зеленый (или голубой)
+    // 2. Иначе, если это черновик или активный заказ — в голубой
+    final Color? cardColor = isMenuOpenForThisOrder 
+        ? Colors.green.shade100 // Яркая подсветка для меню
+        : (isDraft || isActive ? Colors.blue.shade50 : null);
+
+    // Логика рамки
+    final BorderSide borderSide = isMenuOpenForThisOrder
+        ? BorderSide(color: Colors.green.shade600, width: 2) // Жирная рамка для меню
+        : (isDraft || isActive 
+            ? BorderSide(color: Colors.blue.shade300, width: 1.5) 
+            : BorderSide.none);
 
     final dateStr = '${order.orderDate.day}.${order.orderDate.month}.${order.orderDate.year}';
 
@@ -428,14 +462,16 @@ class _OrdersScreenState extends State<OrdersScreen> {
           } else {
             await DatabaseHelper.instance.deleteOrder(order.id!);
           }
+          DatabaseHelper.dbUpdateTrigger.value++; 
           _loadOrders();
         },
+
         child: Card(
           margin: const EdgeInsets.only(bottom: 8),
-          color: highlight ? Colors.blue.shade50 : null,
+          color: cardColor,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
-            side: highlight ? BorderSide(color: Colors.blue.shade300, width: 1.5) : BorderSide.none,
+            side: borderSide, // <-- Применяем рамку
           ),
           child: ExpansionTile(
             leading: CircleAvatar(

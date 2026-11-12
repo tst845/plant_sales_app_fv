@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'dart:async';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'models/order.dart'; 
 import 'database/database_helper.dart';
@@ -8,21 +9,24 @@ import 'screens/calculator_screen.dart';
 import 'screens/calculator_manager.dart';
 import 'screens/order_manager.dart';
 import 'screens/orders_screen.dart';
-
+import 'services/share_intent_service.dart';
+import 'services/file_format_detector.dart';
+import 'services/order_import_service.dart';
+import 'widgets/import_wizard_dialog.dart';
 
 final ValueNotifier<int> mainScreenTabNotifier = ValueNotifier<int>(0);
 
-void main() async { // <-- Добавлено ключевое слово 'async'
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   
-  // Проверяем, первый ли это запуск
+  // Инициализация приема файлов
+  await ShareIntentService.instance.initialize();
+
   final prefs = await SharedPreferences.getInstance();
   bool isFirstRun = prefs.getBool('isFirstRun') ?? true;
 
   if (isFirstRun) {
-    // Вставляем тестовые данные
     await DatabaseHelper.instance.insertSampleData();
-    // Запоминаем, что первый запуск прошел
     await prefs.setBool('isFirstRun', false);
   }
 
@@ -60,6 +64,7 @@ class MainScreen extends StatefulWidget {
 }
 
 class _MainScreenState extends State<MainScreen> {
+  StreamSubscription? _fileSubscription;
   int _selectedIndex = 0;
   late final List<Widget> _widgetOptions;
 
@@ -74,19 +79,74 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
+    _tabListener();
     mainScreenTabNotifier.addListener(_tabListener);
     _widgetOptions = <Widget>[
-      const CatalogScreen(),    // Индекс 0
-      const CalculatorScreen(), // Индекс 1
-      const OrdersScreen(),     // Индекс 2
-      const SettingsScreen(),   // Индекс 3
+      const CatalogScreen(),
+      const CalculatorScreen(),
+      const OrdersScreen(),
+      const SettingsScreen(),
     ];
+    
+    // ПОДПИСКА НА ФАЙЛЫ
+    _fileSubscription = ShareIntentService.instance.fileStream.listen((path) {
+      _handleIncomingFile(path);
+    });
   }
 
   @override
   void dispose() {
     mainScreenTabNotifier.removeListener(_tabListener);
+    _fileSubscription?.cancel();
     super.dispose();
+  }
+  
+  Future<void> _handleIncomingFile(String path) async {
+    final format = await FileFormatDetector.detectFormat(path);
+    
+    String title = 'Получен файл';
+    String description = 'Что вы хотите сделать с файлом?';
+    
+    if (format == FileFormat.catalog) {
+      description = 'Файл похож на каталог препаратов. Импортировать его?';
+    } else if (format == FileFormat.orders) {
+      description = 'Файл похож на выгрузку заказов. Импортировать его?';
+    }
+
+    if (!mounted) return;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(description),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx), 
+            child: const Text('Отмена')
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              OrderImportService.importOrders(context, filePath: path); // Теперь работает
+            },
+            child: const Text('Заказы')
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              showDialog(
+                context: context,
+                barrierDismissible: false,
+                builder: (_) => ImportWizardDialog(initialFilePath: path),
+              );
+            },
+            child: const Text('Каталог препаратов')
+          ),
+        ],
+      ),
+    );
   }
 
   void _onItemTapped(int index) {
@@ -120,14 +180,13 @@ class _MainScreenState extends State<MainScreen> {
             ),
             label: 'Расчет',
           ),
-          // Вкладка "Заказы" с индикатором
           BottomNavigationBarItem(
             icon: ValueListenableBuilder<Order?>(
               valueListenable: OrderManager.instance.activeOrder,
               builder: (context, activeOrder, child) {
                 return Badge(
                   isLabelVisible: activeOrder != null,
-                  smallSize: 10, // Размер точки
+                  smallSize: 10,
                   backgroundColor: Colors.orange,
                   child: const Icon(Icons.receipt_long),
                 );
