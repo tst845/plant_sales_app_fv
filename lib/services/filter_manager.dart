@@ -1,3 +1,4 @@
+// lib\services\filter_manager.dart
 import 'package:flutter/material.dart';
 
 class FilterManager {
