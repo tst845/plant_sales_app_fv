@@ -12,82 +12,137 @@ import '../utils/data_normalizer.dart';
 
 class ImportService {
   
-  // === 1. АНАЛИЗ ЛИСТА ===
+  // Словарь вынесен на уровень класса (сюда!)
+  static const Map<String, List<String>> _columnKeywords = {
+    'name': [
+      'название препарата', 'наименование препарата', 'название удобрения', 'номенклатура',
+      'название', 'наименование', 'препарат', 'продукт', 'товар', 'удобрение', 'средство'
+    ],
+    'category': [
+      'категория', 'группа', 'раздел', 'класс', 'тип', 'вид'
+    ],
+    'composition': [
+      'действующее вещество', 'действующие вещества', 'состав', 'дв', 'формула', 'компонент'
+    ],
+    'manufacturer': [
+      'производитель', 'изготовитель', 'компания', 'бренд', 'фирма', 'вендор', 'торговая марка'
+    ],
+    'package': [
+      'фасовка', 'упаковка', 'объем', 'объём', 'тара', 'единица'
+    ],
+    'rate': [
+      'норма расхода', 'расход', 'дозировка', 'норматив'
+    ],
+    'price': [
+      'цена за ед', 'цена', 'стоимость', 'прайс', 'тариф', 'с ндс', 'без ндс', 'руб'
+    ],
+    'description': [
+      'описание', 'применение', 'характеристики', 'назначение', 'свойства', 'инструкция'
+    ],
+    'cultures': [
+      'культуры', 'обрабатываемые', 'растения', 'посевы'
+    ],
+    'diseases': [
+      'болезни', 'заболевания', 'вредители', 'вредные объекты', 'сорняки', 'защита от'
+    ],
+  };
+
+  // === 1. АНАЛИЗ ЛИСТА (Скоринг шапки) ===
   static SheetConfig? analyzeSheet(Sheet sheet, String sheetName) {
-    // 1. Определяем формат (Каталог с колонкой "Тип" или Прайс-лист с "№ п/п")
-    String? format;
+    int bestScore = 0;
     int headerRowIndex = -1;
 
+    // 1. Поиск строки шапки с помощью весов
     for (int i = 0; i < sheet.rows.length && i < 30; i++) {
       final row = sheet.rows[i];
       if (row.isEmpty) continue;
       final rowStr = row.map((c) => c?.value?.toString().toLowerCase() ?? '').join(' ');
       
-      if (rowStr.contains('тип') && rowStr.contains('название')) {
-        format = 'catalog';
+      if (rowStr.contains('id заказа')) return null; 
+
+      int score = 0;
+      if (_columnKeywords['name']!.any((kw) => rowStr.contains(kw))) score += 3;
+      if (_columnKeywords['price']!.any((kw) => rowStr.contains(kw))) score += 2;
+      if (_columnKeywords['composition']!.any((kw) => rowStr.contains(kw)) ||
+          _columnKeywords['manufacturer']!.any((kw) => rowStr.contains(kw)) ||
+          _columnKeywords['package']!.any((kw) => rowStr.contains(kw)) ||
+          _columnKeywords['rate']!.any((kw) => rowStr.contains(kw))) score += 1;
+
+      if (score > bestScore && score >= 3) {
+        bestScore = score;
         headerRowIndex = i;
-        break;
-      }
-      if (rowStr.contains('препарат') || rowStr.contains('наименование')) {
-        format = 'price';
-        headerRowIndex = i;
-        break;
       }
     }
 
-    if (format == null || headerRowIndex == -1) return null;
+    if (headerRowIndex == -1) return null;
 
     final headerRow = sheet.rows[headerRowIndex];
     final headerLabels = headerRow.map((c) => c?.value?.toString().trim() ?? '').toList();
     
-    // 2. Ищем возможные колонки по корням слов
-    final Map<String, List<int>> availableColumns = {
-      'name': [], 'category': [], 'composition': [], 'manufacturer': [],
-      'package': [], 'rate': [], 'price': [], 'description': [],
-      'cultures': [], 'diseases': [],
-    };
+    // 2. Распределение колонок с учетом весов
+    final Map<String, List<int>> availableColumns = {};
+    final Map<String, int?> selectedColumns = {};
 
-    final keywords = {
-      'name': ['препарат', 'название', 'наименование'],
-      'category': ['тип', 'категория'],
-      'composition': ['состав', 'действующ', 'веществ', 'дв'],
-      'manufacturer': ['производитель'],
-      'package': ['упаковк', 'фасовк'],
-      'rate': ['норм', 'расход'],
-      'price': ['цен', 'стоим', 'руб'],
-      'description': ['описан', 'примен', 'характеристик'],
-      'cultures': ['культур', 'обрабат'],
-      'diseases': ['болезн', 'заболев', 'вредит'],
-    };
+    _columnKeywords.forEach((field, keywords) {
+      availableColumns[field] = [];
+      int? bestIdx = null;
+      int bestColScore = 0;
 
-    for (int i = 0; i < headerLabels.length; i++) {
-      final lower = headerLabels[i].toLowerCase();
-      if (lower.isEmpty) continue;
-      
-      for (var entry in keywords.entries) {
-        for (var kw in entry.value) {
-          if (lower.contains(kw)) {
-            availableColumns[entry.key]!.add(i);
-            break; 
+      for (int i = 0; i < headerLabels.length; i++) {
+        final lower = headerLabels[i].toLowerCase().trim();
+        if (lower.isEmpty) continue;
+
+        int colScore = 0;
+        for (int k = 0; k < keywords.length; k++) {
+          if (lower.contains(keywords[k])) {
+            int weight = (keywords.length - k) * 10 + keywords[k].length;
+            if (weight > colScore) colScore = weight;
+          }
+        }
+
+        if (colScore > 0) {
+          availableColumns[field]!.add(i);
+          if (colScore > bestColScore) {
+            bestColScore = colScore;
+            bestIdx = i;
+          }
+        }
+      }
+      selectedColumns[field] = bestIdx;
+    });
+
+    // 3. Определяем формат
+    final hasCategoryCol = availableColumns['category']!.isNotEmpty;
+    final dataRows = sheet.rows.sublist(headerRowIndex + 1);
+
+    // Собираем категории из разделителей (если колонки нет)
+    final List<String> detectedCats = [];
+    if (!hasCategoryCol) {
+      for (var row in dataRows) {
+        if (row.isEmpty) continue;
+        for (int i = 0; i < row.length; i++) {
+          if (i == selectedColumns['name']) continue;
+          final val = row[i]?.value?.toString() ?? '';
+          final normType = DataNormalizer.normalizeProductType(val);
+          if (normType != 'Другое' && !detectedCats.contains(normType)) {
+             detectedCats.add(normType);
           }
         }
       }
     }
 
-    // По умолчанию выбираем первую найденную колонку для каждого поля
-    final Map<String, int?> selectedColumns = {};
-    availableColumns.forEach((key, indices) {
-      selectedColumns[key] = indices.isNotEmpty ? indices.first : null;
-    });
-
     return SheetConfig(
       sheetName: sheetName,
-      format: format,
+      format: hasCategoryCol ? 'catalog' : 'pricelist',
+      categorySource: hasCategoryCol 
+          ? CategorySource.column 
+          : (detectedCats.isNotEmpty ? CategorySource.separatorRows : CategorySource.fallbackOnly),
+      detectedCategories: detectedCats,
       headerLabels: headerLabels,
       availableColumns: availableColumns,
       selectedColumns: selectedColumns,
       headerRowIndex: headerRowIndex,
-      dataRows: sheet.rows.sublist(headerRowIndex + 1),
+      dataRows: dataRows,
     );
   }
 
@@ -113,24 +168,43 @@ class ImportService {
     final cultIdx = config.selectedColumns['cultures'] ?? -1;
     final disIdx = config.selectedColumns['diseases'] ?? -1;
 
+    String currentCategory = config.fallbackCategory;
+
     for (int i = 0; i < config.dataRows.length; i++) {
       final row = config.dataRows[i];
       if (row.isEmpty) continue;
 
       String getCell(int idx) => (idx != -1 && idx < row.length) ? (row[idx]?.value?.toString().trim() ?? '') : '';
 
+      // 1. Проверяем на строку-разделитель (только если колонки "Категория" нет)
+      if (config.categorySource != CategorySource.column) {
+        bool isSeparator = false;
+        for (int c = 0; c < row.length; c++) {
+          if (c == nameIdx) continue; // не считаем колонку с названием
+          final val = getCell(c);
+          if (val.isNotEmpty) {
+            final norm = DataNormalizer.normalizeProductType(val);
+            if (norm != 'Другое') {
+              currentCategory = norm; // Обновили категорию
+              isSeparator = true;
+              break;
+            }
+          }
+        }
+        if (isSeparator) continue; // Переходим к следующей строке
+      }
+
+      // 2. Парсим препарат
       final name = getCell(nameIdx);
       if (name.isEmpty) continue; // Название обязательно всегда
 
-      // Пропускаем строки-разделители (например, ГЕРБИЦИДЫ), если нет колонки категории
-      if (categoryIdx == -1) {
-         final upper = name.toUpperCase();
-         if (upper == 'ГЕРБИЦИДЫ' || upper == 'ИНСЕКТИЦИДЫ' || upper == 'ФУНГИЦИДЫ') continue;
-      }
+      // Пропускаем очевидный мусор (итого, всего)
+      final upperName = name.toUpperCase();
+      if (upperName.startsWith('ИТОГО') || upperName.startsWith('ВСЕГО')) continue;
 
       stats.totalRows++;
 
-      final category = getCell(categoryIdx);
+      final category = (config.categorySource == CategorySource.column) ? getCell(categoryIdx) : currentCategory;
       final composition = getCell(compIdx);
       final manufacturer = getCell(manIdx);
       final package = getCell(packIdx);
@@ -157,8 +231,11 @@ class ImportService {
          for (var c in cultStr.split(',')) {
             final norm = DataNormalizer.normalizeCategoryNameSync(c, isCulture: true, knownCultures: knownCultures, knownDiseases: knownDiseases);
             if (norm.isNotEmpty) {
-               cultures.add(norm);
-               if (!knownCultures.contains(norm)) stats.newCultures.add(norm);
+              cultures.add(norm);
+              if (!knownCultures.contains(norm)) {
+                stats.newCultures.add(norm);
+                knownCultures.add(norm);
+            }
             }
          }
       }
@@ -170,7 +247,10 @@ class ImportService {
             final norm = DataNormalizer.normalizeCategoryNameSync(d, isCulture: false, knownCultures: knownCultures, knownDiseases: knownDiseases);
             if (norm.isNotEmpty) {
                diseases.add(norm);
-               if (!knownDiseases.contains(norm)) stats.newDiseases.add(norm);
+               if (!knownDiseases.contains(norm)) {
+                stats.newDiseases.add(norm);
+                knownDiseases.add(norm);
+               }
             }
          }
       }
@@ -304,13 +384,20 @@ class ImportService {
     int skipped = 0;
     List<String> errors = [];
 
-    final existingNamesSet = await db.getExistingProductNames();
+    final allProducts = await db.getAllProducts();
+    final existingProductsMap = {
+      for (var prod in allProducts)
+        prod.name.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase(): prod
+    };
+
 
     await database.transaction((txn) async {
       for (var p in state.parsedProducts) {
-        bool isExisting = existingNamesSet.contains(p.name.trim().toLowerCase());
-        
-        // 1. Валидация для новых препаратов
+        final normName = p.name.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase();
+        final existingProduct = existingProductsMap[normName];
+        final isExisting = existingProduct != null;
+
+        // 1. Валидация для НОВЫХ препаратов
         if (!isExisting && p.category.isEmpty) {
           skipped++;
           errors.add('${p.name}: нет категории (пропущен)');
@@ -323,49 +410,28 @@ class ImportService {
             skipped++;
             continue;
           }
-          
-          final existingProducts = await txn.query('products', columns: ['id'], where: 'name = ?', whereArgs: [p.name.trim()]);
-          if (existingProducts.isNotEmpty) {
-            final id = existingProducts.first['id'] as int;
-            
-            if (state.ignoreEmptyCells) {
-              // УМНОЕ ОБНОВЛЕНИЕ: берем старые данные, если новые пустые
-              final existingMaps = await txn.rawQuery('''
-                SELECT p.*, c.name as category, m.name as manufacturer 
-                FROM products p
-                LEFT JOIN categories c ON p.category_id = c.id
-                LEFT JOIN manufacturers m ON p.manufacturer_id = m.id
-                WHERE p.id = ?
-              ''', [id]);
-              
-              if (existingMaps.isNotEmpty) {
-                final existingProduct = Product.fromMap(existingMaps.first);
-                
-                // Сливаем: приоритет у новых данных, если они не пусты
-                final mergedProduct = Product(
-                  id: id,
-                  name: p.name, // Название всегда берем новое (или старое, они совпадают)
-                  category: p.category.isNotEmpty ? p.category : existingProduct.category,
-                  composition: p.composition ?? existingProduct.composition,
-                  manufacturer: p.manufacturer ?? existingProduct.manufacturer,
-                  package: p.package ?? existingProduct.package,
-                  consumptionRate: p.consumptionRate ?? existingProduct.consumptionRate,
-                  price: p.price ?? existingProduct.price,
-                  description: p.description ?? existingProduct.description,
-                  // Культуры/болезни берем из файла, если они там не пусты
-                  cultures: p.cultures.isNotEmpty ? p.cultures : existingProduct.cultures,
-                  diseases: p.diseases.isNotEmpty ? p.diseases : existingProduct.diseases,
-                );
-                
-                await db.updateProduct(mergedProduct);
-                updated++;
-              }
-            } else {
-              // ПОЛНАЯ ПЕРЕЗАПИСЬ (ignoreEmptyCells == false)
-              final updatedProduct = p.copyWith(id: id);
-              await db.updateProduct(updatedProduct);
-              updated++;
-            }
+
+          final id = existingProduct.id!;
+
+          if (state.ignoreEmptyCells) {
+            final mergedProduct = Product(
+              id: id,
+              name: p.name,
+              category: p.category.isNotEmpty ? p.category : existingProduct.category,
+              composition: p.composition ?? existingProduct.composition,
+              manufacturer: p.manufacturer ?? existingProduct.manufacturer,
+              package: p.package ?? existingProduct.package,
+              consumptionRate: p.consumptionRate ?? existingProduct.consumptionRate,
+              price: p.price ?? existingProduct.price,
+              description: p.description ?? existingProduct.description,
+              cultures: p.cultures.isNotEmpty ? p.cultures : existingProduct.cultures,
+              diseases: p.diseases.isNotEmpty ? p.diseases : existingProduct.diseases,
+            );
+            await db.updateProductWithExecutor(mergedProduct, txn);
+            updated++;
+          } else {
+            await db.updateProductWithExecutor(p.copyWith(id: id), txn);
+            updated++;
           }
         } 
         // 3. Добавление нового
@@ -374,13 +440,21 @@ class ImportService {
             skipped++;
             continue;
           }
-          await db.insertProduct(p);
+          final newId = await db.insertProductWithExecutor(p, txn);
           added++;
-          existingNamesSet.add(p.name.trim().toLowerCase());
+          // Добавляем в кэш, чтобы если в файле дважды "Дерби" с разными пробелами, не вставить дважды
+          existingProductsMap[normName] = p.copyWith(id: newId); 
         }
       }
-    });
-
+}).timeout(
+      const Duration(seconds: 60),
+      onTimeout: () {
+        throw Exception(
+          'Импорт занял больше 60 секунд и был прерван. '
+          'Скорее всего, в БД осталась блокировка — перезапустите приложение.',
+        );
+      },
+    );
     return ImportResult(
       added: added, 
       updated: updated, 

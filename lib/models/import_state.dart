@@ -5,39 +5,42 @@ import 'product.dart';
 enum ImportStep { sheets, columns, emptyCells, duplicates, mode, report }
 enum ImportMode { addOnly, updateOnly, updateAndAdd }
 
+enum CategorySource { column, separatorRows, fallbackOnly }
+
 class SheetConfig {
   final String sheetName;
-  final String format; // 'price' | 'catalog'
+  final String format; // 'catalog' | 'pricelist'
+  final CategorySource categorySource;
+  
   final List<String> headerLabels;
-  final Map<String, List<int>> availableColumns; // field -> indices
-  final Map<String, int?> selectedColumns; // field -> chosen index
+  final Map<String, List<int>> availableColumns;
+  final Map<String, int?> selectedColumns;
   final int headerRowIndex;
   final List<dynamic> dataRows;
+  
+  // Список найденных в файле категорий (для отображения в UI)
+  final List<String> detectedCategories; 
+  
+  // Категория по умолчанию (для формы C или если разделитель не распознан)
+  String fallbackCategory;
 
   SheetConfig({
     required this.sheetName,
     required this.format,
+    required this.categorySource,
     required this.headerLabels,
     required this.availableColumns,
     required this.selectedColumns,
     required this.headerRowIndex,
     required this.dataRows,
+    this.detectedCategories = const [],
+    this.fallbackCategory = 'Другое',
   });
 
   bool get hasName => selectedColumns['name'] != null;
-  bool get hasCategory => selectedColumns['category'] != null;
-  
-  // Проверка на дубли колонок (например, две колонки "Цена")
-  bool get hasDuplicateSelections {
-    final selectedIndices = <int>[];
-    for (var idx in selectedColumns.values) {
-      if (idx != null) {
-        if (selectedIndices.contains(idx)) return true;
-        selectedIndices.add(idx);
-      }
-    }
-    return false;
-  }
+  bool get hasCategory => categorySource == CategorySource.column 
+      ? selectedColumns['category'] != null 
+      : true; // Для прайсов категория всегда "есть" (через разделители или дефолт)
 }
 
 class SheetStats {
@@ -113,12 +116,14 @@ class ImportState extends ChangeNotifier {
   ImportState({
     required this.filePath,
     required this.availableSheets,
-    this.selectedSheets = const [],
+    List<String>? selectedSheets,          // ← было this.selectedSheets = const []
     Map<String, SheetConfig>? configs,
     Map<String, String>? duplicatePriorities,
-    this.duplicates = const [],
-  })  : configs = configs ?? {},
-        duplicatePriorities = duplicatePriorities ?? {};
+    List<DuplicateGroup>? duplicates,      // ← на всякий случай тоже
+  })  : selectedSheets = selectedSheets ?? [],     // ← новый mutable-список
+        configs = configs ?? {},
+        duplicatePriorities = duplicatePriorities ?? {},
+        duplicates = duplicates ?? [];
 
   void notify() => notifyListeners();
 }

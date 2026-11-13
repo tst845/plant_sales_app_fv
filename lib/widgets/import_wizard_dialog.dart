@@ -1,3 +1,4 @@
+// lib\widgets\import_wizard_dialog.dart
 import 'package:flutter/material.dart';
 import 'package:excel/excel.dart' hide Border;
 import 'package:file_picker/file_picker.dart';
@@ -21,6 +22,7 @@ class _ImportWizardDialogState extends State<ImportWizardDialog> {
   ImportStep _currentStep = ImportStep.sheets;
   ImportState? _state;
   Excel? _excel;
+  String? _sheetsError; // сообщение об ошибке анализа выбранного листа
   
   bool _isBusy = false;
   String _busyMessage = '';
@@ -131,10 +133,13 @@ class _ImportWizardDialogState extends State<ImportWizardDialog> {
 
   bool _canGoNext() {
     if (_state == null) return false;
-    if (_currentStep == ImportStep.sheets) return _state!.selectedSheets.isNotEmpty;
+    if (_currentStep == ImportStep.sheets) {
+      return _state!.selectedSheets.isNotEmpty;
+    }
     if (_currentStep == ImportStep.columns) {
       for (var sheet in _state!.selectedSheets) {
-        if (!_state!.configs[sheet]!.hasName) return false;
+        final config = _state!.configs[sheet];
+        if (config == null || !config.hasName) return false;  
       }
       return true;
     }
@@ -154,7 +159,11 @@ class _ImportWizardDialogState extends State<ImportWizardDialog> {
       final Map<Product, String> productSourceSheet = {}; // Для поиска дублей
 
       for (var sheetName in _state!.selectedSheets) {
-        final config = _state!.configs[sheetName]!;
+        final config = _state!.configs[sheetName];
+        if (config == null) {
+          _state!.sheetStats[sheetName] = SheetStats(); // пустая статистика
+          continue;
+        }
         final stats = SheetStats();
         
         final products = ImportService.parseSheet(
@@ -265,7 +274,33 @@ class _ImportWizardDialogState extends State<ImportWizardDialog> {
                       _getStepTitle(),
                       style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                     ),
-                    const SizedBox(height: 16),
+                    if (_state?.filePath != null && _state!.filePath.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 12, bottom: 16), // Увеличен отступ сверху и снизу
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.insert_drive_file, size: 18, color: Colors.blue.shade700), // Иконка тоже синяя
+                            const SizedBox(width: 8),
+                            Flexible(
+                              child: Tooltip(
+                                message: _state!.filePath,
+                                child: Text(
+                                  'Файл: ${_basename(_state!.filePath)}',
+                                  style: TextStyle(
+                                    fontSize: 14, // Увеличен шрифт (было 12)
+                                    fontWeight: FontWeight.w500,
+                                    color: Colors.blue.shade700, // Изменен цвет на синий
+                                  ),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    else
+                      const SizedBox(height: 16),
                     Expanded(child: _buildStepContent()),
                     if (_currentStep != ImportStep.report) _buildBottomNav(),
                   ],
@@ -316,36 +351,108 @@ class _ImportWizardDialogState extends State<ImportWizardDialog> {
     );
   }
 
-  // --- ШАГ 1: ЛИСТЫ ---
+
+    // --- ШАГ 1: ЛИСТЫ ---
   Widget _buildSheetsStep() {
-    return ListView(
-      children: _state!.availableSheets.map((sheet) {
-        return CheckboxListTile(
-          title: Text(sheet),
-          value: _state!.selectedSheets.contains(sheet),
-          onChanged: (val) {
-            setState(() {
-              if (val == true) {
-                _state!.selectedSheets.add(sheet);
-                // Анализируем лист при первом выборе
-                if (!_state!.configs.containsKey(sheet)) {
-                  final config = ImportService.analyzeSheet(_excel!.tables[sheet]!, sheet);
-                  if (config != null) _state!.configs[sheet] = config;
-                }
-              } else {
-                _state!.selectedSheets.remove(sheet);
-              }
-            });
-          },
-        );
-      }).toList(),
+    if (_state == null) {
+      return const Center(child: Text('Файл не загружен'));
+    }
+
+    return Column(
+      children: [
+        if (_sheetsError != null)
+          Container(
+            margin: const EdgeInsets.only(bottom: 8),
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.red.shade50,
+              border: Border.all(color: Colors.red.shade300),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.warning_amber, color: Colors.red, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _sheetsError!,
+                    style: const TextStyle(color: Colors.red, fontSize: 13),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        Expanded(
+          child: ListView(
+            children: _state!.availableSheets.map((sheet) {
+              final isSelected = _state!.selectedSheets.contains(sheet);
+              final hasConfig = _state!.configs.containsKey(sheet);
+              final broken = isSelected && !hasConfig;
+
+              return CheckboxListTile(
+                key: ValueKey('sheet_$sheet'),
+                title: Text(sheet),
+                subtitle: broken
+                    ? const Text(
+                        'Лист не распознан как каталог или прайс-лист',
+                        style: TextStyle(color: Colors.red, fontSize: 12),
+                      )
+                    : null,
+                value: isSelected,
+                onChanged: (val) => _onSheetToggled(sheet, val == true),
+              );
+            }).toList(),
+          ),
+        ),
+      ],
     );
+  }
+
+  void _onSheetToggled(String sheet, bool selected) {
+    // Снятие галочки — просто убираем из списка
+    if (!selected) {
+      setState(() {
+        _state!.selectedSheets.remove(sheet);
+        _sheetsError = null;
+      });
+      return;
+    }
+
+    final sheetObj = _excel?.tables[sheet];
+    if (sheetObj == null) {
+      setState(() => _sheetsError = 'Не удалось прочитать лист "$sheet"');
+      return;
+    }
+
+    SheetConfig? config;
+    try {
+      config = ImportService.analyzeSheet(sheetObj, sheet);
+    } catch (e, st) {
+      debugPrint('analyzeSheet("$sheet") error: $e\n$st');
+      setState(() => _sheetsError = 'Ошибка анализа листа "$sheet": $e');
+      return;
+    }
+
+    if (config == null) {
+      setState(() => _sheetsError =
+          'Лист "$sheet" не похож на каталог или прайс-лист '
+          '(не найдены колонки «Название» и «Тип» / «Препарат»).');
+      return;
+    }
+
+    setState(() {
+      _state!.selectedSheets.add(sheet);
+      _state!.configs[sheet] = config!;
+      _sheetsError = null;
+    });
   }
 
   // --- ШАГ 2: КОЛОНКИ ---
   Widget _buildColumnsStep() {
-    final missingCategorySheets = _state!.selectedSheets.where((s) => !_state!.configs[s]!.hasCategory).toList();
-
+    final missingCategorySheets = _state!.selectedSheets
+    .where((s) => _state!.configs[s]?.hasCategory == false)
+    .toList();
+    
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -383,7 +490,15 @@ class _ImportWizardDialogState extends State<ImportWizardDialog> {
                 Expanded(
                   child: TabBarView(
                     children: _state!.selectedSheets.map((sheetName) {
-                      final config = _state!.configs[sheetName]!;
+                      final config = _state!.configs[sheetName];
+                      if (config == null) {
+                        return const Center(
+                          child: Text(
+                            'Лист не распознан',
+                            style: TextStyle(color: Colors.red),
+                          ),
+                        );
+                      }
                       return _buildSheetConfig(config);
                     }).toList(),
                   ),
@@ -397,31 +512,106 @@ class _ImportWizardDialogState extends State<ImportWizardDialog> {
   }
 
   Widget _buildSheetConfig(SheetConfig config) {
+    final labels = {
+      'name': 'Название', 
+      'category': 'Категория', 
+      'composition': 'Состав', 
+      'manufacturer': 'Производитель', 
+      'package': 'Упаковка', 
+      'rate': 'Норма расхода', 
+      'price': 'Цена', 
+      'description': 'Описание', 
+      'cultures': 'Культуры', 
+      'diseases': 'Болезни'
+    };
+
     return ListView(
-      padding: const EdgeInsets.all(8),
+      padding: const EdgeInsets.all(16),
       children: config.availableColumns.keys.map((field) {
+        
+        // ОСОБЫЙ БЛОК ДЛЯ КАТЕГОРИИ
+        if (field == 'category') {
+          if (config.categorySource == CategorySource.column) {
+            // Формат A: обычный выпадающий список (как было)
+            final indices = config.availableColumns['category']!;
+            if (indices.isEmpty) return const SizedBox.shrink();
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 20.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Категория (Колонка)', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  DropdownButtonFormField<int?>(
+                    value: config.selectedColumns['category'],
+                    isExpanded: true,
+                    decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true),
+                    items: [
+                      const DropdownMenuItem(value: null, child: Text('Не импортировать')),
+                      ...indices.map((idx) => DropdownMenuItem(value: idx, child: Text(config.headerLabels[idx], overflow: TextOverflow.ellipsis))),
+                    ],
+                    onChanged: (val) => setState(() => config.selectedColumns['category'] = val),
+                  ),
+                ],
+              ),
+            );
+          } else {
+            // Формат B/C: Категории из разделителей + поле дефолта
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 20.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Категория (из разделителей)', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  if (config.detectedCategories.isNotEmpty)
+                    Wrap(
+                      spacing: 8,
+                      children: config.detectedCategories.map((c) => Chip(label: Text(c))).toList(),
+                    )
+                  else
+                    const Text('Разделители не найдены. Будет использована категория по умолчанию.', style: TextStyle(fontSize: 12, color: Colors.orange)),
+                  
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    key: ValueKey('fallback_${config.sheetName}'), // Важно для сохранения ввода
+                    initialValue: config.fallbackCategory,
+                    decoration: const InputDecoration(
+                      labelText: 'Категория по умолчанию',
+                      hintText: 'Другое',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    onChanged: (val) => config.fallbackCategory = val.isEmpty ? 'Другое' : val,
+                  ),
+                ],
+              ),
+            );
+          }
+        }
+
+        // ОСТАЛЬНЫЕ ПОЛЯ (Название, Цена и т.д.)
         final indices = config.availableColumns[field]!;
         if (indices.isEmpty && field != 'name') return const SizedBox.shrink();
 
-        final labels = {'name': 'Название', 'category': 'Категория', 'composition': 'Состав', 'manufacturer': 'Производитель', 'package': 'Упаковка', 'rate': 'Норма расхода', 'price': 'Цена', 'description': 'Описание', 'cultures': 'Культуры', 'diseases': 'Болезни'};
-        
-        return ListTile(
-          title: Text(labels[field] ?? field),
-          trailing: DropdownButton<int?>(
-            value: config.selectedColumns[field],
-            hint: const Text('Нет'),
-            items: [
-              const DropdownMenuItem(value: null, child: Text('Не импортировать')),
-              ...indices.map((idx) => DropdownMenuItem(
-                value: idx,
-                child: Text(config.headerLabels[idx], overflow: TextOverflow.ellipsis),
-              )),
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 20.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(labels[field] ?? field, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<int?>(
+                value: config.selectedColumns[field],
+                isExpanded: true,
+                decoration: const InputDecoration(border: OutlineInputBorder(), isDense: true),
+                items: [
+                  const DropdownMenuItem(value: null, child: Text('Не импортировать')),
+                  ...indices.map((idx) => DropdownMenuItem(value: idx, child: Text(config.headerLabels[idx], overflow: TextOverflow.ellipsis))),
+                ],
+                onChanged: (val) => setState(() => config.selectedColumns[field] = val),
+              ),
             ],
-            onChanged: (val) {
-              setState(() {
-                config.selectedColumns[field] = val;
-              });
-            },
           ),
         );
       }).toList(),
@@ -556,6 +746,15 @@ class _ImportWizardDialogState extends State<ImportWizardDialog> {
         children: [
           const Icon(Icons.check_circle, color: Colors.green, size: 60),
           const SizedBox(height: 16),
+          if (_state!.filePath.isNotEmpty)
+            Text(
+              'Файл: ${_basename(_state!.filePath)}',
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.grey.shade700,
+              ),
+            ),
+          const SizedBox(height: 16),
           Text('Добавлено: ${res.added}', style: const TextStyle(fontSize: 16)),
           Text('Обновлено: ${res.updated}', style: const TextStyle(fontSize: 16)),
           Text('Пропущено: ${res.skipped}', style: const TextStyle(fontSize: 16)),
@@ -579,4 +778,11 @@ class _ImportWizardDialogState extends State<ImportWizardDialog> {
       ),
     );
   }
+
+  String _basename(String path) {
+    // Универсально для Android (/), iOS (/), Windows (\).
+    final idx = path.lastIndexOf(RegExp(r'[/\\]'));
+    return idx >= 0 ? path.substring(idx + 1) : path;
+  }
+
 }

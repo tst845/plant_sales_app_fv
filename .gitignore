@@ -46,3 +46,23 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+
+# Android Keystore & Secrets (КРИТИЧНО ДЛЯ БЕЗОПАСНОСТИ)
+*.jks
+*.keystore
+key.properties
+android/key.properties
+
+# Файлы конфигурации локализации (если есть)
+/android/local.properties
+
+# Нейросетевые модели (Модуль диагностики)
+assets/models/
+*.onnx
+*.tflite
+*.pt
+*.pth
+
+# Логи приложения (на случай, если они будут сохраняться локально в корне)
+*.log
+app.log

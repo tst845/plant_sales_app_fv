@@ -12,6 +12,7 @@ class OrderImportService {
   
   // ДОБАВЛЕН параметр filePath
   static Future<void> importOrders(BuildContext context, {String? filePath}) async {
+    bool progressShown = false;
     try {
       String? path = filePath;
       if (path == null) {
@@ -75,16 +76,22 @@ class OrderImportService {
             continue;
           }
 
-          final id = int.tryParse(idStr);
+          final id = _parseIntLoose(idStr);
           if (id == null) {
             parseErrors.add('Заказы, строка ${i+1}: некорректный ID ($idStr)');
             continue;
           }
 
-          DateTime date = DateTime.now();
+          DateTime? date;
           if (dateIdx != -1) {
-            final dStr = _safeCellText(row[dateIdx]);
-            try { date = DateTime.parse(dStr); } catch(_) {}
+            date = _parseRuDate(_safeCellText(row[dateIdx]));
+          }
+          if (date == null) {
+            parseErrors.add(
+              'Заказы, строка ${i + 1}: не распознана дата '
+              '«${_safeCellText(row[dateIdx])}» — оставлена текущая',
+            );
+            date = DateTime.now();
           }
 
           parsedOrders.add(Order(
@@ -110,7 +117,10 @@ class OrderImportService {
         final headers = sheet.rows[headerRow].map((c) => _safeCellText(c).toLowerCase()).toList();
         int orderIdIdx = _findCol(headers, ['id заказа', 'заказ']);
         int prodIdIdx = _findCol(headers, ['id препарата', 'id товара']);
-        int nameIdx = _findCol(headers, ['наименование', 'название', 'препарат']);
+        int nameIdx = _findCol(headers, ['наименование', 'название']);
+        if (nameIdx == -1) {
+          nameIdx = _findCol(headers, ['препарат']); // Ищем "препарат" только если нет "наименования"
+        }
         int priceIdx = _findCol(headers, ['цена']);
         int discIdx = _findCol(headers, ['скидк']);
         int rateIdx = _findCol(headers, ['норм']);
@@ -129,14 +139,14 @@ class OrderImportService {
              continue;
           }
 
-          final orderId = int.tryParse(orderIdStr);
+          final orderId = _parseIntLoose(orderIdStr);
           if (orderId == null) continue;
 
           Order? targetOrder = parsedOrders.where((o) => o.id == orderId).firstOrNull;
           
           int? prodId;
           if (prodIdIdx != -1) {
-            prodId = int.tryParse(_safeCellText(row[prodIdIdx]));
+            prodId = _parseIntLoose(_safeCellText(row[prodIdIdx]));
           }
 
           final item = OrderItem(
@@ -189,17 +199,34 @@ class OrderImportService {
 
       // --- СОХРАНЕНИЕ ---
       if (!context.mounted) return;
-      showDialog(context: context, barrierDismissible: false, builder: (ctx) => const AlertDialog(content: Row(children: [CircularProgressIndicator(), SizedBox(width: 20), Text('Сохранение данных...')])));
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => const AlertDialog(
+          content: Row(children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 20),
+            Text('Сохранение данных...'),
+          ]),
+        ),
+      );
+      progressShown = true;
 
       final db = DatabaseHelper.instance;
-      final database = await db.database; 
+      final database = await db.database;
 
       int addedOrders = 0;
       int updatedOrders = 0;
       int itemsAddedToExisting = 0;
       List<String> criticalErrors = [];
 
-      await database.transaction((txn) async {
+      // ВАЖНО: снимок продуктов берём ДО транзакции.
+      // Внутри транзакции обращения к database (синглтону) приводят
+      // к deadlock: sqflite держит соединение до конца транзакции.
+      final productsMap = await db.getProductsIdMap();
+
+      await database.transaction(
+        (txn) async {
         if (mode == 'replace') {
           await txn.delete('order_items');
           await txn.delete('orders');
@@ -207,7 +234,6 @@ class OrderImportService {
 
         final rows = await txn.query('orders', columns: ['id']);
         final existingIds = rows.map((r) => r['id'] as int).toSet();
-        final productsMap = await db.getProductsIdMap();
 
         for (var order in parsedOrders) {
           for (int i = 0; i < order.items.length; i++) {
@@ -234,6 +260,7 @@ class OrderImportService {
             }
           } else {
             await db.insertOrderWithId(order, executor: txn);
+            existingIds.add(order.id!);
             addedOrders++;
           }
         }
@@ -282,7 +309,15 @@ class OrderImportService {
             criticalErrors.add('Заказ №$orderId не найден в БД. Пропущено позиций: ${newItems.length}');
           }
         }
-      });
+      }).timeout(
+        const Duration(seconds: 60),
+        onTimeout: () {
+          throw Exception(
+            'Импорт занял больше минуты и был прерван. '
+            'Скорее всего, в БД есть блокировка; попробуйте перезапустить приложение.',
+          );
+        },
+      );
 
       if (context.mounted) Navigator.of(context).pop(); // Закрываем диалог прогресса
       DatabaseHelper.dbUpdateTrigger.value++; 
@@ -304,10 +339,24 @@ class OrderImportService {
       if (context.mounted) _showMessage(context, report, isSuccess: true);
 
     } catch (e, st) {
-      if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
       debugPrint('Order import error: $e\n$st');
-      if (context.mounted) _showMessage(context, 'Ошибка импорта заказов: $e');
+      if (progressShown && context.mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+      if (context.mounted) {
+        _showMessage(context, 'Ошибка импорта заказов: $e');
+      }
     }
+  }
+
+
+  static int? _parseIntLoose(String s) {
+    final v = s.trim();
+    if (v.isEmpty) return null;
+    final direct = int.tryParse(v);
+    if (direct != null) return direct;
+    final d = double.tryParse(v.replaceAll(',', '.'));
+    return d?.toInt();
   }
 
   static String _safeCellText(dynamic cell) {
@@ -319,6 +368,29 @@ class OrderImportService {
     } catch (_) {
       return '';
     }
+  }
+  /// Парсит дату из «9.11.2026», «09.11.2026», «2026-11-09», «09/11/2026».
+/// Возвращает null, если формат не распознан.
+  static DateTime? _parseRuDate(String s) {
+    final v = s.trim();
+    if (v.isEmpty) return null;
+
+    // ISO (2026-11-09) — пробуем сразу
+    final iso = DateTime.tryParse(v);
+    if (iso != null) return iso;
+
+    // «дд.мм.гггг» / «дд/мм/гггг» / «дд-мм-гггг» — цифры и любые разделители
+    final parts = v.split(RegExp(r'[./\-]'));
+    if (parts.length == 3) {
+      final d = int.tryParse(parts[0]);
+      final m = int.tryParse(parts[1]);
+      final y = int.tryParse(parts[2]);
+      if (d != null && m != null && y != null && y > 1900) {
+        return DateTime(y, m, d);
+      }
+    }
+
+    return null;
   }
 
   static int _findHeaderRow(Sheet sheet, List<List<String>> keywordGroups) {

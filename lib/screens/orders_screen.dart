@@ -1,15 +1,17 @@
+// lib\screens\orders_screen.dart
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // Для HapticFeedback
+import 'package:share_plus/share_plus.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:excel/excel.dart' hide Border;
+import 'dart:io';
+import 'dart:typed_data';
 import '../models/order.dart';
 import '../database/database_helper.dart';
 import 'order_edit_screen.dart';
 import 'order_manager.dart';
-import 'dart:typed_data';
-import 'package:file_picker/file_picker.dart';
-import 'package:excel/excel.dart' hide Border;
-import 'dart:io';
-import 'package:flutter/services.dart'; // Для HapticFeedback
-import 'package:share_plus/share_plus.dart';
-import 'package:path_provider/path_provider.dart';
+import 'calculator_manager.dart';
 
 class OrdersScreen extends StatefulWidget {
   const OrdersScreen({super.key});
@@ -273,9 +275,13 @@ class _OrdersScreenState extends State<OrdersScreen> {
     }
   }
 
-  void _showOrderActions(BuildContext context, Order order) {
+    void _showOrderActions(BuildContext context, Order order) {
     final isDraft = order.id == null;
     
+    // Определяем, является ли текущий заказ активным
+    final activeOrder = OrderManager.instance.activeOrder.value;
+    final isActive = activeOrder != null && activeOrder.id == order.id;
+
     // Включаем подсветку карточки
     setState(() {
       _contextMenuOrderId = order.id; 
@@ -311,6 +317,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
                   scrollDirection: Axis.horizontal,
                   child: Row(
                     children: [
+                      // 1. Блок скачивания и отправки (только для сохраненных)
                       if (!isDraft) ...[
                         _buildActionButton(
                           icon: Icons.download,
@@ -333,6 +340,8 @@ class _OrdersScreenState extends State<OrdersScreen> {
                         ),
                         const SizedBox(width: 16),
                       ],
+                      
+                      // 2. Кнопка редактирования
                       _buildActionButton(
                         icon: Icons.edit,
                         label: 'Редактировать',
@@ -350,6 +359,20 @@ class _OrdersScreenState extends State<OrdersScreen> {
                           if (res == true) _loadOrders();
                         },
                       ),
+
+                      // 3. Кнопка быстрого сохранения (в самом конце)
+                      if (isDraft || isActive) ...[
+                        const SizedBox(width: 16), // Отступ перед кнопкой
+                        _buildActionButton(
+                          icon: Icons.save,
+                          label: 'Сохранить',
+                          color: Colors.green,
+                          onTap: () {
+                            Navigator.pop(ctx); // Закрываем шторку
+                            _saveActiveOrder(context, order); // Вызываем сохранение
+                          },
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -478,18 +501,32 @@ class _OrdersScreenState extends State<OrdersScreen> {
               backgroundColor: isDraft ? Colors.blue : _getStatusColor(order.status),
               child: Icon(isDraft ? Icons.edit_document : _getStatusIcon(order.status), color: Colors.white),
             ),
-            // Заголовок теперь содержит только имя (без кнопок)
+            // Заголовок теперь содержит имя и кнопку быстрого сохранения
             title: Padding(
               padding: const EdgeInsets.only(top: 8.0),
-              child: Text(
-                isDraft
-                    ? 'Черновик (${order.clientName.isEmpty ? "Без имени" : order.clientName})'
-                    : order.clientName,
-                style: TextStyle(
-                  fontWeight: FontWeight.bold,
-                  color: isDraft ? Colors.blue.shade900 : null,
-                ),
-                softWrap: true,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      isDraft
+                          ? 'Черновик (${order.clientName.isEmpty ? "Без имени" : order.clientName})'
+                          : order.clientName,
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: isDraft ? Colors.blue.shade900 : null,
+                      ),
+                      softWrap: true,
+                    ),
+                  ),
+                  // Кнопка сохранения для активного заказа
+                  if (isActive || isDraft)
+                    IconButton(
+                      icon: const Icon(Icons.save, color: Colors.green),
+                      tooltip: 'Быстрое сохранение',
+                      onPressed: () => _saveActiveOrder(context, order),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                ],
               ),
             ),
             subtitle: Column(
@@ -777,4 +814,53 @@ class _OrdersScreenState extends State<OrdersScreen> {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка экспорта: $e')));
     }
   }
+
+  Future<void> _saveActiveOrder(BuildContext context, Order order) async {
+    // Берем актуальные данные из менеджера, так как пользователь мог что-то изменить
+    final active = OrderManager.instance.activeOrder.value;
+    if (active == null) return;
+
+    if (active.clientName.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Укажите имя или компанию для сохранения'), backgroundColor: Colors.orange),
+      );
+      return;
+    }
+
+    try {
+      if (active.id == null) {
+        await DatabaseHelper.instance.insertOrder(active);
+      } else {
+        await DatabaseHelper.instance.updateOrder(active);
+      }
+
+      // Очищаем синхронизацию с калькулятором, как это делает экран редактирования
+      if (OrderManager.instance.isSyncedWithCalculator.value) {
+        CalculatorManager.instance.clearAll();
+      }
+
+      // Очищаем активный заказ (кнопка пропадет, заказ перейдет в обычный список)
+      OrderManager.instance.clearActiveOrder();
+      
+      // Обновляем UI
+      DatabaseHelper.dbUpdateTrigger.value++;
+      _loadOrders();
+
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Заказ сохранен'), backgroundColor: Colors.green),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка сохранения: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
+
+
+
 }

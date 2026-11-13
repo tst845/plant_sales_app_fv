@@ -1,3 +1,4 @@
+<!-- android\app\src\main\AndroidManifest.xml -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Разрешения -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
@@ -30,11 +31,35 @@
             </intent-filter>
 
             <!-- ДЛЯ ПРИЕМА ФАЙЛОВ ИЗВНЕ -->
+            <!-- Фильтр для приема файлов с "размытым" MIME-типом -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+
+            <!-- Фильтр для приема файлов, у которых тип вообще не определен -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <!-- ДЛЯ ПРИЕМА ОДНОГО ФАЙЛА -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="application/vnd.ms-excel" />
                 <data android:mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+
+            <!-- ДЛЯ ПРИЕМА НЕСКОЛЬКИХ ФАЙЛОВ (используют некоторые файловые менеджеры и Excel) -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/vnd.ms-excel" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+                <data android:mimeType="application/octet-stream" />
             </intent-filter>
             
         </activity>

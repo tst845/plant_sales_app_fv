@@ -97,9 +97,27 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
   }
 
   Future<void> _save() async {
-    if (!_formKey.currentState!.validate()) return;
+    if (!mounted) return;
 
-    // Собираем нормализованные данные
+    // Мягкая проверка формы
+    if (_formKey.currentState != null) {
+      if (!_formKey.currentState!.validate()) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Заполните обязательные поля'), backgroundColor: Colors.orange),
+        );
+        return;
+      }
+    } else {
+      // Если форма не успела инициализироваться, проверяем хотя бы Название вручную
+      debugPrint('[_save] WARNING: _formKey.currentState is null');
+      if (_nameCtrl.text.trim().isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Введите название препарата'), backgroundColor: Colors.orange),
+        );
+        return;
+      }
+    }
+
     final compositionStr = DataNormalizer.normalizeComposition(_compositionList);
     final packageStr = '${_packageValueCtrl.text.trim()} $_packageUnit'.trim();
     final rateStr = DataNormalizer.normalizeRate(_rateValueCtrl.text, _rateUnit);
@@ -109,14 +127,21 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
       name: _nameCtrl.text.trim(),
       category: _selectedCategory,
       composition: compositionStr.isEmpty ? null : compositionStr,
-      manufacturer: _manufacturerCtrl.text.trim().isEmpty ? null : _manufacturerCtrl.text.trim(),
+      manufacturer: _manufacturerCtrl.text.trim().isEmpty
+          ? null
+          : _manufacturerCtrl.text.trim(),
       package: _packageValueCtrl.text.trim().isEmpty ? null : packageStr,
       consumptionRate: _rateValueCtrl.text.trim().isEmpty ? null : rateStr,
-      price: _priceCtrl.text.trim().isEmpty ? null : double.tryParse(_priceCtrl.text.replaceAll(',', '.')),
-      description: _descriptionCtrl.text.trim().isEmpty ? null : _descriptionCtrl.text.trim(),
-      cultures: _culturesList, 
-      diseases: _diseasesList, 
+      price: _priceCtrl.text.trim().isEmpty
+          ? null
+          : double.tryParse(_priceCtrl.text.replaceAll(',', '.')),
+      description:
+          _descriptionCtrl.text.trim().isEmpty ? null : _descriptionCtrl.text.trim(),
+      cultures: _culturesList,
+      diseases: _diseasesList,
     );
+
+    debugPrint('[_save] calling DB. isNew=${widget.product == null}');
 
     try {
       if (widget.product == null) {
@@ -124,9 +149,15 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
       } else {
         await DatabaseHelper.instance.updateProduct(product);
       }
-      if (mounted) Navigator.pop(context, true); // true = успешно сохранено
-    } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
+      debugPrint('[_save] DB ok');
+      if (mounted) Navigator.pop(context, true);
+    } catch (e, st) {
+      debugPrint('[_save] ERROR: $e\n$st');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка сохранения: $e')),
+        );
+      }
     }
   }
 
@@ -139,7 +170,7 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
           IconButton(icon: const Icon(Icons.check), onPressed: _save),
         ],
       ),
-      body: Form(
+      body: SafeArea(
         key: _formKey,
         child: ListView(
           padding: const EdgeInsets.all(16),
@@ -378,32 +409,58 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
   // ==========================================
   // ДИАЛОГ 2: ТЕГИ (Культуры и Болезни) с автодополнением
   // ==========================================
-
-  Future<List<String>?> _showTagsDialog(BuildContext context, List<String> current, {required bool isCulture}) async {
+  Future<List<String>?> _showTagsDialog(
+    BuildContext context,
+    List<String> current, {
+    required bool isCulture,
+  }) async {
     final List<String> tempList = List.from(current);
     final TextEditingController inputCtrl = TextEditingController();
-    
-    // Получаем уникальные значения из БД для подсказок
+
+    // Загружаем справочники ОДИН РАЗ до показа диалога.
     final dbData = await DatabaseHelper.instance.getUniqueCulturesAndDiseases();
-    final suggestions = isCulture ? dbData['cultures']! : dbData['diseases']!;
-    
+    final knownCultures = dbData['cultures'] ?? [];
+    final knownDiseases = dbData['diseases'] ?? [];
+    final suggestions = isCulture ? knownCultures : knownDiseases;
+
+    if (!context.mounted) return null;
+
     return showDialog<List<String>>(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setState) {
-          
-          // Функция добавления (чтобы не дублировать код)
-          Future<void> addTag() async {
+          String? feedback;   // текст-подсказка под полем ввода
+
+          void addTag() {
             final text = inputCtrl.text.trim();
-            if (text.isEmpty) return;
-            
-            // Нормализуем
-            final norm = await DataNormalizer.normalizeCategoryName(text, isCulture: isCulture);
-            
-            if (norm.isNotEmpty && !tempList.contains(norm)) {
-              setState(() => tempList.add(norm));
-              inputCtrl.clear();
+            if (text.isEmpty) {
+              setState(() => feedback = 'Введите название');
+              return;
             }
+
+            final norm = DataNormalizer.normalizeCategoryNameSync(
+              text,
+              isCulture: isCulture,
+              knownCultures: knownCultures,
+              knownDiseases: knownDiseases,
+            );
+
+            if (norm.isEmpty) {
+              setState(() =>
+                  feedback = '«$text» не распознано как '
+                      '${isCulture ? "культура" : "болезнь"}');
+              return;
+            }
+            if (tempList.contains(norm)) {
+              setState(() => feedback = '«$norm» уже есть в списке');
+              return;
+            }
+
+            setState(() {
+              tempList.add(norm);
+              feedback = null;
+            });
+            inputCtrl.clear();
           }
 
           return AlertDialog(
@@ -414,7 +471,6 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Поле ввода
                   Row(
                     children: [
                       Expanded(
@@ -426,7 +482,7 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
                             isDense: true,
                           ),
                           textInputAction: TextInputAction.done,
-                          onSubmitted: (_) => addTag(), // Обработка Enter
+                          onSubmitted: (_) => addTag(),
                         ),
                       ),
                       const SizedBox(width: 8),
@@ -436,18 +492,31 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
                       ),
                     ],
                   ),
-                  
-                  // Подсказки из БД (в виде чипсов)
+                  if (feedback != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        feedback!,
+                        style: const TextStyle(
+                          color: Colors.orange,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+
                   if (suggestions.isNotEmpty) ...[
                     const SizedBox(height: 12),
-                    const Text('Подсказки из базы:', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                    const Text(
+                      'Подсказки из базы:',
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
                     const SizedBox(height: 4),
                     SizedBox(
                       height: 36,
                       child: ListView.builder(
                         scrollDirection: Axis.horizontal,
                         itemCount: suggestions.length,
-                        itemBuilder: (ctx, i) {
+                        itemBuilder: (_, i) {
                           final s = suggestions[i];
                           return Padding(
                             padding: const EdgeInsets.only(right: 6),
@@ -467,20 +536,24 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
                   const SizedBox(height: 16),
                   const Divider(),
                   const SizedBox(height: 8),
-                  const Text('Добавленные:', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const Text('Добавленные:',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8),
-                  
-                  // Список добавленных тегов
+
                   if (tempList.isEmpty)
-                    const Text('Пока ничего не добавлено', style: TextStyle(color: Colors.grey))
+                    const Text('Пока ничего не добавлено',
+                        style: TextStyle(color: Colors.grey))
                   else
                     Wrap(
                       spacing: 8,
                       runSpacing: 4,
-                      children: tempList.map((tag) => Chip(
-                        label: Text(tag),
-                        onDeleted: () => setState(() => tempList.remove(tag)),
-                      )).toList(),
+                      children: tempList
+                          .map((tag) => Chip(
+                                label: Text(tag),
+                                onDeleted: () =>
+                                    setState(() => tempList.remove(tag)),
+                              ))
+                          .toList(),
                     ),
                 ],
               ),
@@ -496,4 +569,5 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
       ),
     );
   }
+
 }

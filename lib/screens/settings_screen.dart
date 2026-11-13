@@ -277,7 +277,8 @@ class SettingsScreen extends StatelessWidget {
   // ============================================================
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
+    return SafeArea(
+      child: SingleChildScrollView(
       child: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
@@ -424,6 +425,7 @@ class SettingsScreen extends StatelessWidget {
             const SizedBox(height: 40),
           ],
         ),
+      ),
       ),
     );
   }

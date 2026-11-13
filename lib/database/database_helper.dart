@@ -196,11 +196,6 @@ class DatabaseHelper {
     return res;
   }
 
-  Future<int> insertProduct(Product product) async {
-    Database db = await database;
-    return await _insertSingleProduct(db, product);
-  }
-
   Future<void> insertProducts(List<Product> products) async {
     Database db = await database;
     await db.transaction((txn) async {
@@ -254,11 +249,6 @@ class DatabaseHelper {
     return products;
   }
 
-  Future<int> updateProduct(Product product) async {
-    Database db = await database;
-    return await _updateSingleProduct(db, product);
-  }
-
   Future<int> deleteProduct(int id) async {
     Database db = await database;
     return await db.delete('products', where: 'id = ?', whereArgs: [id]);
@@ -279,7 +269,8 @@ class DatabaseHelper {
   Future<Set<String>> getExistingProductNames() async {
     final db = await database;
     final rows = await db.query('products', columns: ['name']);
-    return rows.map((r) => (r['name'] as String).trim().toLowerCase()).toSet();
+    // Добавлено .replaceAll(RegExp(r'\s+'), ' ') для борьбы с двойными пробелами
+    return rows.map((r) => (r['name'] as String).trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase()).toSet();
   }
 
   Future<void> updateProducts(List<Product> products) async {
@@ -593,8 +584,6 @@ class DatabaseHelper {
       diseases: ['Ржавчина', 'Септориоз'],
     );
     
-    await insertProduct(sampleProduct);
-
     Order sampleOrder = Order(
       id: 1,
       clientName: 'Иван Иванов (Пример)',
@@ -615,6 +604,30 @@ class DatabaseHelper {
     );
     
     await insertOrderWithId(sampleOrder);
+  }
+
+  Future<int> insertProduct(Product product) async {
+    final db = await database;
+    return await _insertSingleProduct(db, product);
+  }
+
+  Future<int> insertProductWithExecutor(
+    Product product,
+    DatabaseExecutor executor,
+  ) async {
+    return await _insertSingleProduct(executor, product);
+  }
+
+  Future<int> updateProduct(Product product) async {
+    final db = await database;
+    return await _updateSingleProduct(db, product);
+  }
+
+  Future<int> updateProductWithExecutor(
+    Product product,
+    DatabaseExecutor executor,
+  ) async {
+    return await _updateSingleProduct(executor, product);
   }
 
     // ==========================================

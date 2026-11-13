@@ -2,6 +2,32 @@
 import '../database/database_helper.dart';
 
 class DataNormalizer {
+   
+  static const Map<String, String> _typeRoots = {
+    'герб': 'Гербицид',
+    'инсек': 'Инсектицид',
+    'фунг': 'Фунгицид',
+    'протр': 'Протравитель',
+    'десик': 'Десикант',
+    'спец': 'Спецпрепарат',
+    'роден': 'Родентицид',
+    'фумиг': 'Фумигант',
+    'микроуд': 'Микроудобрение',
+  };
+
+  /// Умное распознавание типа препарата из строки-разделителя
+  static String normalizeProductType(String input) {
+    final word = input.trim().toLowerCase().replaceAll(RegExp(r'[\s\-]'), '');
+    if (word.isEmpty) return 'Другое';
+
+    // Ищем совпадения по корням (гербециды -> герб -> Гербицид)
+    for (var entry in _typeRoots.entries) {
+      if (word.contains(entry.key)) {
+        return entry.value;
+      }
+    }
+    return 'Другое';
+  }
   // Словарь базовых синонимов (для культур и болезней)
   static const Map<String, String> _synonyms = {
     // Культуры
@@ -33,8 +59,7 @@ class DataNormalizer {
   };
 
   static const List<String> _blackList = [
-    '4-д', '2м-4х', 'мцпа', 'сорные', 'сорняки', 'вредители', 'болезни',
-    'виды', 'комплекс', 'фитофтороз', 'альтернариоз', 'мучнистая', 'парша'
+    '4-д', '2м-4х', 'мцпа'
   ];
 
   /// Приводит первую букву к верхнему регистру, а остальные к нижнему.
@@ -77,11 +102,16 @@ class DataNormalizer {
     final dbList = isCulture ? knownCultures : knownDiseases;
     for (final dbWord in dbList) {
       final dbLower = dbWord.toLowerCase();
-      final rootInput = word.length > 3 ? word.substring(0, word.length - 2) : word;
-      final rootDb = dbLower.length > 3 ? dbLower.substring(0, dbLower.length - 2) : dbLower;
 
-      if (rootInput == rootDb || dbLower.startsWith(rootInput) || word.startsWith(rootDb)) {
-        return dbWord;
+      // Точное совпадение (регистр не важен)
+      if (dbLower == lowerWord) return dbWord;
+
+      // Совпадение с учётом склонений: различие только в 1–2 последних символах
+      // (Пшеница / Пшеницы / Пшеницу; Тля / Тли)
+      if (lowerWord.length >= 4 && dbLower.length >= 4) {
+        final rootInput = lowerWord.substring(0, lowerWord.length - 2);
+        final rootDb = dbLower.substring(0, dbLower.length - 2);
+        if (rootInput == rootDb) return dbWord;
       }
     }
 

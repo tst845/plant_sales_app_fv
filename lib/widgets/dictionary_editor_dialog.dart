@@ -171,25 +171,22 @@ class _DictionaryEditorDialogState extends State<DictionaryEditorDialog> {
     // 3. Сохранение в БД
     try {
       await dbHelper.saveDictChanges(table, changedItems);
-      
-      // 4. Обновляем локальные данные после успеха
-      setState(() {
-        for (var item in changedItems) {
-          item.reset();
-        }
-        // Если были слияния, нужно перезагрузить данные, так как структура изменилась
-        if (mergesCount > 0 || deletesCount > 0) {
-          _loadData(); 
-        }
-      });
-      
+
+      // ВСЕГДА перечитываем из БД — originalName в EditableDictItem
+      // не обновляется при переименовании, а при merge/delete меняются id.
+      await _loadData();
+
       if (mounted) {
-        DatabaseHelper.dbUpdateTrigger.value++; // Обновляем каталог
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Изменения сохранены'), backgroundColor: Colors.green));
+        DatabaseHelper.dbUpdateTrigger.value++;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Изменения сохранены'), backgroundColor: Colors.green),
+        );
       }
       return true;
     } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
+      }
       return false;
     }
   }
@@ -273,6 +270,7 @@ class _DictionaryEditorDialogState extends State<DictionaryEditorDialog> {
                             itemBuilder: (context, index) {
                               final item = items[index];
                               return _DictionaryItemTile(
+                                key: ValueKey('dict_${table}_${item.id}'),
                                 item: item,
                                 onChanged: () => setState(() {}),
                               );
@@ -354,6 +352,16 @@ class _DictionaryItemTileState extends State<_DictionaryItemTile> {
   void dispose() {
     _ctrl.dispose();
     super.dispose();
+  }
+  
+  @override
+  void didUpdateWidget(covariant _DictionaryItemTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.item.id != widget.item.id ||
+        oldWidget.item.originalName != widget.item.originalName) {
+      _ctrl.text = widget.item.newName;
+      _isEditing = false;
+    }
   }
 
   void _saveEdit() {
