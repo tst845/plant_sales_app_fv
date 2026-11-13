@@ -1,12 +1,14 @@
 // lib/screens/settings_screen.dart
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:excel/excel.dart';
-import 'dart:typed_data';
+import 'package:share_plus/share_plus.dart';
 import '../database/database_helper.dart';
 import '../widgets/import_wizard_dialog.dart';
-import '../services/order_import_service.dart';
 import '../widgets/dictionary_editor_dialog.dart';
+import '../services/order_import_service.dart';
+import '../utils/app_logger.dart';
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
@@ -104,7 +106,12 @@ class SettingsScreen extends StatelessWidget {
       if (outputUri != null && context.mounted) {
         _showMessage(context, 'Заказы успешно экспортированы!', isSuccess: true);
       }
-    } catch (e) {
+    } catch (e, st) {
+      AppLogger().e(
+        'Экспорт заказов: ошибка (заказов в базе: ${orders.length})',
+        error: e,
+        stackTrace: st,
+      );
       if (context.mounted) Navigator.of(context, rootNavigator: true).pop();
       if (context.mounted) _showMessage(context, 'Ошибка: $e');
     }
@@ -198,6 +205,11 @@ class SettingsScreen extends StatelessWidget {
       }
 
     } catch (e, st) {
+      AppLogger().e(
+        'Экспорт каталога: ошибка (препаратов в базе: ${products.length})',
+        error: e,
+        stackTrace: st,
+      );
       if (context.mounted) Navigator.of(context, rootNavigator: true).pop(); 
       debugPrint('Export error: $e\n$st');
       if (context.mounted) {
@@ -235,7 +247,8 @@ class SettingsScreen extends StatelessWidget {
       await DatabaseHelper.instance.clearOrdersOnly();
       DatabaseHelper.dbUpdateTrigger.value++;
       if (context.mounted) _showMessage(context, 'Все заказы удалены', isSuccess: true);
-    } catch (e) {
+    } catch (e, st) {
+      AppLogger().e('Очистка заказов: ошибка', error: e, stackTrace: st);
       if (context.mounted) _showMessage(context, 'Ошибка: $e');
     }
   }
@@ -246,7 +259,8 @@ class SettingsScreen extends StatelessWidget {
       await DatabaseHelper.instance.clearProductsOnly();
       DatabaseHelper.dbUpdateTrigger.value++;
       if (context.mounted) _showMessage(context, 'Каталог препаратов удален', isSuccess: true);
-    } catch (e) {
+    } catch (e, st) {
+      AppLogger().e('Очистка каталога препаратов: ошибка', error: e, stackTrace: st);
       if (context.mounted) _showMessage(context, 'Ошибка: $e');
     }
   }
@@ -257,7 +271,8 @@ class SettingsScreen extends StatelessWidget {
       await DatabaseHelper.instance.clearEverything();
       DatabaseHelper.dbUpdateTrigger.value++;
       if (context.mounted) _showMessage(context, 'База данных полностью очищена', isSuccess: true);
-    } catch (e) {
+    } catch (e, st) {
+      AppLogger().e('ПОЛНЫЙ СБРОС: ошибка', error: e, stackTrace: st);
       if (context.mounted) _showMessage(context, 'Ошибка: $e');
     }
   }
@@ -366,7 +381,40 @@ class SettingsScreen extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 15),
+            // --- КНОПКА ОТПРАВКИ ЛОГОВ ---
+            TextButton.icon(
+              onPressed: () async {
+                final path = await AppLogger().prepareForSharing();
+                if (!context.mounted) return;
 
+                if (path == null) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Ошибок не зафиксировано')),
+                  );
+                  return;
+                }
+
+                try {
+                  await SharePlus.instance.share(
+                    ShareParams(
+                      files: [XFile(path, mimeType: 'text/plain')],
+                      text: 'Логи приложения Plant Sales',
+                    ),
+                  );
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Ошибка отправки логов: $e')),
+                    );
+                  }
+                }
+              },
+              icon: const Icon(Icons.bug_report, color: Colors.red),
+              label: const Text('Отправить логи', style: TextStyle(color: Colors.red)),
+              style: TextButton.styleFrom(
+                minimumSize: const Size(250, 48),
+              ),
+            ),
             const Divider(),
             const SizedBox(height: 10),
 

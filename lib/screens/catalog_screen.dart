@@ -13,6 +13,7 @@ import '../services/filter_manager.dart';
 import '../models/product.dart';
 import '../models/order.dart';
 import '../main.dart';
+import '../utils/app_logger.dart';
 
 class CatalogFilter {
   Set<String> categories = {};
@@ -187,7 +188,8 @@ class _CatalogScreenState extends State<CatalogScreen> {
         
         _isLoading = false;
       });
-    } catch (e) {
+    } catch (e, st) {
+      AppLogger().e('Каталог: ошибка загрузки данных', error: e, stackTrace: st);
       setState(() => _isLoading = false);
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка загрузки: $e')));
     }
@@ -432,10 +434,15 @@ class _CatalogScreenState extends State<CatalogScreen> {
       final Uri? outputUri = await FilePicker.saveFile(dialogTitle: 'Сохранить Excel', fileName: defaultFileName, bytes: uint8Bytes, type: FileType.custom, allowedExtensions: ['xlsx']);
 
       if (outputUri != null && mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Сохранено ${productsToExport.length} записей'), backgroundColor: Colors.green));
-    } catch (e) {
-      if (mounted) Navigator.of(context, rootNavigator: true).pop();
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
-    }
+    } catch (e, st) {
+        AppLogger().e(
+          'Каталог: ошибка экспорта в Excel ($title, записей: ${productsToExport.length})',
+          error: e,
+          stackTrace: st,
+        );
+        if (mounted) Navigator.of(context, rootNavigator: true).pop();
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
+      }
   }
 
   // Обертка для вызова из AppBar
@@ -1098,8 +1105,21 @@ class _CatalogScreenState extends State<CatalogScreen> {
       },
       onDismissed: (direction) async {
         if (product.id != null) {
-          await DatabaseHelper.instance.deleteProduct(product.id!);
-          _loadData();
+          try {
+            await DatabaseHelper.instance.deleteProduct(product.id!);
+            _loadData();
+          } catch (e, st) {
+            AppLogger().e(
+              'Каталог: ошибка удаления препарата "${product.name}" (id: ${product.id})',
+              error: e,
+              stackTrace: st,
+            );
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Ошибка удаления: $e')),
+              );
+            }
+          }
         }
       },
       child: Card( 

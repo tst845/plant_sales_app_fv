@@ -1,11 +1,13 @@
 // lib/main.dart
 import 'package:sqflite_sqlcipher/sqflite.dart';
 import 'dart:async';
-import 'dart:io';                          
+import 'dart:io';      
+import 'dart:ui';                    
 
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'utils/app_logger.dart';
 import 'database/database_helper.dart';
 import 'models/order.dart';
 import 'screens/calculator_manager.dart';
@@ -23,18 +25,44 @@ final ValueNotifier<int> mainScreenTabNotifier = ValueNotifier<int>(0);
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  await ShareIntentService.instance.initialize();
 
+  // Инициализируем логгер
+  await AppLogger().init();
+
+  // Перехват ошибок Flutter-фреймворка
+  FlutterError.onError = (details) {
+    AppLogger().e(
+      'FlutterError: ${details.exceptionAsString()}',
+      error: details.exception,
+      stackTrace: details.stack,
+    );
+    FlutterError.presentError(details); // Показываем стандартную ошибку
+  };
+
+  // Перехват асинхронных ошибок
+  PlatformDispatcher.instance.onError = (error, stack) {
+    AppLogger().e('PlatformDispatcher Error', error: error, stackTrace: stack);
+    return true; // Ошибка обработана
+  };
+
+  // Ваш существующий код
+  await ShareIntentService.instance.initialize();
   final prefs = await SharedPreferences.getInstance();
   bool isFirstRun = prefs.getBool('isFirstRun') ?? true;
   if (isFirstRun) {
-    await DatabaseHelper.instance.insertSampleData();
-    await prefs.setBool('isFirstRun', false);
+    try {
+      await DatabaseHelper.instance.insertSampleData();
+      await prefs.setBool('isFirstRun', false);
+    } catch (e, st) {
+      AppLogger().e('insertSampleData error', error: e, stackTrace: st);
+      await prefs.setBool('isFirstRun', false);
+    }
   }
 
   runApp(const MyApp());
 }
+
+
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});

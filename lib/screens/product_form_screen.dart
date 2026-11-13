@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../database/database_helper.dart';
 import '../models/product.dart';
 import '../utils/data_normalizer.dart';
-
+import '../utils/app_logger.dart';
 class ProductFormScreen extends StatefulWidget {
   final Product? product; // Если null - создание, иначе - редактирование
 
@@ -152,13 +152,20 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
       debugPrint('[_save] DB ok');
       if (mounted) Navigator.pop(context, true);
     } catch (e, st) {
-      debugPrint('[_save] ERROR: $e\n$st');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Ошибка сохранения: $e')),
+        AppLogger().e(
+          'Ошибка сохранения препарата "${product.name}" '
+          '(id: ${product.id}, isNew: ${widget.product == null})',
+          error: e,
+          stackTrace: st,
         );
+        debugPrint('[_save] ERROR: $e\n$st');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Ошибка сохранения: $e')),
+          );
+        }
       }
-    }
+
   }
 
   @override

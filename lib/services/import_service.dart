@@ -9,6 +9,7 @@ import '../database/database_helper.dart';
 import '../models/product.dart';
 import '../models/import_state.dart';
 import '../utils/data_normalizer.dart';
+import '../utils/app_logger.dart';
 
 class ImportService {
   
@@ -375,94 +376,106 @@ class ImportService {
   }
 
   // === 6. ПРИМЕНЕНИЕ ИМПОРТА ===
-  static Future<ImportResult> applyImport(ImportState state) async {
-    final db = DatabaseHelper.instance;
-    final database = await db.database;
-    
-    int added = 0;
-    int updated = 0;
-    int skipped = 0;
-    List<String> errors = [];
+  static Future<ImportResult> applyImport(ImportState state) async 
+  { try{
+      final db = DatabaseHelper.instance;
+      final database = await db.database;
+      
+      int added = 0;
+      int updated = 0;
+      int skipped = 0;
+      List<String> errors = [];
 
-    final allProducts = await db.getAllProducts();
-    final existingProductsMap = {
-      for (var prod in allProducts)
-        prod.name.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase(): prod
-    };
+      final allProducts = await db.getAllProducts();
+      final existingProductsMap = {
+        for (var prod in allProducts)
+          prod.name.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase(): prod
+      };
 
 
-    await database.transaction((txn) async {
-      for (var p in state.parsedProducts) {
-        final normName = p.name.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase();
-        final existingProduct = existingProductsMap[normName];
-        final isExisting = existingProduct != null;
+      await database.transaction((txn) async {
+        for (var p in state.parsedProducts) {
+          final normName = p.name.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase();
+          final existingProduct = existingProductsMap[normName];
+          final isExisting = existingProduct != null;
 
-        // 1. Валидация для НОВЫХ препаратов
-        if (!isExisting && p.category.isEmpty) {
-          skipped++;
-          errors.add('${p.name}: нет категории (пропущен)');
-          continue;
-        }
-
-        // 2. Обновление существующего
-        if (isExisting) {
-          if (state.mode == ImportMode.addOnly) {
+          // 1. Валидация для НОВЫХ препаратов
+          if (!isExisting && p.category.isEmpty) {
             skipped++;
+            errors.add('${p.name}: нет категории (пропущен)');
             continue;
           }
 
-          final id = existingProduct.id!;
+          // 2. Обновление существующего
+          if (isExisting) {
+            if (state.mode == ImportMode.addOnly) {
+              skipped++;
+              continue;
+            }
 
-          if (state.ignoreEmptyCells) {
-            final mergedProduct = Product(
-              id: id,
-              name: p.name,
-              category: p.category.isNotEmpty ? p.category : existingProduct.category,
-              composition: p.composition ?? existingProduct.composition,
-              manufacturer: p.manufacturer ?? existingProduct.manufacturer,
-              package: p.package ?? existingProduct.package,
-              consumptionRate: p.consumptionRate ?? existingProduct.consumptionRate,
-              price: p.price ?? existingProduct.price,
-              description: p.description ?? existingProduct.description,
-              cultures: p.cultures.isNotEmpty ? p.cultures : existingProduct.cultures,
-              diseases: p.diseases.isNotEmpty ? p.diseases : existingProduct.diseases,
+            final id = existingProduct.id!;
+
+            if (state.ignoreEmptyCells) {
+              final mergedProduct = Product(
+                id: id,
+                name: p.name,
+                category: p.category.isNotEmpty ? p.category : existingProduct.category,
+                composition: p.composition ?? existingProduct.composition,
+                manufacturer: p.manufacturer ?? existingProduct.manufacturer,
+                package: p.package ?? existingProduct.package,
+                consumptionRate: p.consumptionRate ?? existingProduct.consumptionRate,
+                price: p.price ?? existingProduct.price,
+                description: p.description ?? existingProduct.description,
+                cultures: p.cultures.isNotEmpty ? p.cultures : existingProduct.cultures,
+                diseases: p.diseases.isNotEmpty ? p.diseases : existingProduct.diseases,
+              );
+              await db.updateProductWithExecutor(mergedProduct, txn);
+              updated++;
+            } else {
+              await db.updateProductWithExecutor(p.copyWith(id: id), txn);
+              updated++;
+            }
+          } 
+          // 3. Добавление нового
+          else {
+            if (state.mode == ImportMode.updateOnly) {
+              skipped++;
+              continue;
+            }
+            final newId = await db.insertProductWithExecutor(p, txn);
+            added++;
+            // Добавляем в кэш, чтобы если в файле дважды "Дерби" с разными пробелами, не вставить дважды
+            existingProductsMap[normName] = p.copyWith(id: newId); 
+          }
+        }
+        }).timeout(
+              const Duration(seconds: 60),
+              onTimeout: () {
+                throw Exception(
+                  'Импорт занял больше 60 секунд и был прерван. '
+                  'Скорее всего, в БД осталась блокировка — перезапустите приложение.',
+                );
+              },
             );
-            await db.updateProductWithExecutor(mergedProduct, txn);
-            updated++;
-          } else {
-            await db.updateProductWithExecutor(p.copyWith(id: id), txn);
-            updated++;
-          }
-        } 
-        // 3. Добавление нового
-        else {
-          if (state.mode == ImportMode.updateOnly) {
-            skipped++;
-            continue;
-          }
-          final newId = await db.insertProductWithExecutor(p, txn);
-          added++;
-          // Добавляем в кэш, чтобы если в файле дважды "Дерби" с разными пробелами, не вставить дважды
-          existingProductsMap[normName] = p.copyWith(id: newId); 
-        }
-      }
-}).timeout(
-      const Duration(seconds: 60),
-      onTimeout: () {
-        throw Exception(
-          'Импорт занял больше 60 секунд и был прерван. '
-          'Скорее всего, в БД осталась блокировка — перезапустите приложение.',
-        );
-      },
+      
+      return ImportResult(
+        added: added, 
+        updated: updated, 
+        skipped: skipped, 
+        errors: errors,
+        newCultures: state.sheetStats.values.fold(0, (sum, s) => sum + s.newCultures.length),
+        newDiseases: state.sheetStats.values.fold(0, (sum, s) => sum + s.newDiseases.length),
+      );
+  } catch (e, st) {
+    AppLogger().e(
+      'applyImport: ошибка импорта каталога '
+      '(продуктов в очереди: ${state.parsedProducts.length}, режим: ${state.mode})',
+      error: e,
+      stackTrace: st,
     );
-    return ImportResult(
-      added: added, 
-      updated: updated, 
-      skipped: skipped, 
-      errors: errors,
-      newCultures: state.sheetStats.values.fold(0, (sum, s) => sum + s.newCultures.length),
-      newDiseases: state.sheetStats.values.fold(0, (sum, s) => sum + s.newDiseases.length),
-    );
+    rethrow; // Важно: пробрасываем дальше, чтобы UI показал ошибку
+  }
+    
   }
 
 }

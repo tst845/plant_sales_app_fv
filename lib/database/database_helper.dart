@@ -583,6 +583,8 @@ class DatabaseHelper {
       cultures: ['Пшеница', 'Ячмень'],
       diseases: ['Ржавчина', 'Септориоз'],
     );
+    // 1. Вставляем препарат и сохраняем его реальный ID
+    final productId = await insertProduct(sampleProduct);
     
     Order sampleOrder = Order(
       id: 1,
@@ -602,7 +604,7 @@ class DatabaseHelper {
         )
       ]
     );
-    
+    // 2. Теперь заказ вставляется корректно
     await insertOrderWithId(sampleOrder);
   }
 
