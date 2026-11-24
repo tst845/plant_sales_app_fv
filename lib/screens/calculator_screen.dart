@@ -16,6 +16,7 @@ class CalculatorScreen extends StatefulWidget {
 
 class _CalculatorScreenState extends State<CalculatorScreen> {
   bool _isOrderMode = false;
+  bool _isReorderMode = false;
 
   @override
   Widget build(BuildContext context) {
@@ -23,6 +24,11 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
       appBar: AppBar(
         title: const Text('Калькулятор скидок'),
         actions: [
+           if (_isReorderMode)
+            TextButton(
+              onPressed: () => setState(() => _isReorderMode = false),
+              child: const Text('Готово', style: TextStyle(color: Colors.blue, fontWeight: FontWeight.bold)),
+            ),
           // Кнопка "Синхронизация / В заказ"
           ValueListenableBuilder<bool>(
             valueListenable: OrderManager.instance.isSyncedWithCalculator,
@@ -101,13 +107,38 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
 
                 return Column(
                   children: [
-                    Expanded(
-                      child: ListView.builder(
+                                        Expanded(
+                      child: ReorderableListView.builder(
+                        buildDefaultDragHandles: false, // Отключаем стандартные ручки справа
                         itemCount: items.length,
+                        onReorder: (oldIndex, newIndex) {
+                          CalculatorManager.instance.reorderItems(oldIndex, newIndex);
+                          if (OrderManager.instance.isSyncedWithCalculator.value) {
+                            // Если синхронизировано с заказом, обновляем и там
+                            final order = OrderManager.instance.activeOrder.value;
+                            if (order != null) {
+                              final newOrderItems = CalculatorManager.instance.items.value.map((c) => OrderItem(
+                                productId: c.productId,
+                                productName: c.name,
+                                basePrice: c.basePrice,
+                                discountPercent: c.percent ?? 0.0,
+                                rate: c.rate,
+                                area: c.area,
+                                packageUnit: c.packageUnit,
+                              )).toList();
+                              OrderManager.instance.updateItems(newOrderItems);
+                            }
+                          }
+                        },
                         itemBuilder: (context, index) {
                           return _CalculatorItemCard(
-                            key: ValueKey(items[index].productId), 
+                            key: ValueKey(items[index].productId),
                             item: items[index],
+                            index: index,
+                            isReorderMode: _isReorderMode,
+                            onLongPress: () {
+                              setState(() => _isReorderMode = true);
+                            },
                           );
                         },
                       ),
@@ -259,8 +290,17 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
 
 class _CalculatorItemCard extends StatefulWidget {
   final CalcItem item;
+  final int index;
+  final bool isReorderMode;
+  final VoidCallback onLongPress;
 
-  const _CalculatorItemCard({super.key, required this.item});
+  const _CalculatorItemCard({
+    super.key, 
+    required this.item, 
+    required this.index,
+    required this.isReorderMode,
+    required this.onLongPress,
+  });
 
   @override
   State<_CalculatorItemCard> createState() => _CalculatorItemCardState();
@@ -309,18 +349,19 @@ class _CalculatorItemCardState extends State<_CalculatorItemCard> {
     super.dispose();
   }
 
-    @override
-    Widget build(BuildContext context) {
-      final unit = widget.item.packageUnit;
-      final base = widget.item.basePrice;
-      final pricePerHaBase = base * widget.item.rate;
+  @override
+  Widget build(BuildContext context) {
+    final unit = widget.item.packageUnit;
+    final base = widget.item.basePrice;
+    final pricePerHaBase = base * widget.item.rate;
 
-      // Проверяем, есть ли скидка, чтобы показать расчет за Га
-      final hasDiscount = widget.item.percent != null && widget.item.percent! > 0;
-      final finalUnitPrice = widget.item.finalPrice ?? base;
-      final pricePerHaFinal = finalUnitPrice * widget.item.rate;
+    final hasDiscount = widget.item.percent != null && widget.item.percent! > 0;
+    final finalUnitPrice = widget.item.finalPrice ?? base;
+    final pricePerHaFinal = finalUnitPrice * widget.item.rate;
 
-      return Card(
+    return GestureDetector(
+      onLongPress: widget.onLongPress,
+      child: Card(
         margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
         child: Padding(
           padding: const EdgeInsets.all(12),
@@ -330,6 +371,15 @@ class _CalculatorItemCardState extends State<_CalculatorItemCard> {
               // СТРОКА 1: Название и Крестик (удалить)
               Row(
                 children: [
+                  if (widget.isReorderMode) ...[
+                    ReorderableDragStartListener(
+                      index: widget.index,
+                      child: const Padding(
+                        padding: EdgeInsets.only(right: 8.0),
+                        child: Icon(Icons.drag_handle, color: Colors.grey),
+                      ),
+                    ),
+                  ],
                   Expanded(
                     child: Text(
                       widget.item.name,
@@ -339,7 +389,9 @@ class _CalculatorItemCardState extends State<_CalculatorItemCard> {
                   IconButton(
                     icon: const Icon(Icons.close, color: Colors.red),
                     onPressed: () => CalculatorManager.instance.removeItem(widget.item.productId),
-                    padding: EdgeInsets.zero, constraints: const BoxConstraints(), visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero, 
+                    constraints: const BoxConstraints(), 
+                    visualDensity: VisualDensity.compact,
                   ),
                 ],
               ),
@@ -349,7 +401,7 @@ class _CalculatorItemCardState extends State<_CalculatorItemCard> {
                 children: [
                   Text(
                     '${base.toStringAsFixed(2)} ₽/$unit',
-                    style: TextStyle(color: const Color.fromARGB(255, 1, 134, 195), fontSize: 16, fontWeight: FontWeight.w600),
+                    style: const TextStyle(color: Color.fromARGB(255, 1, 134, 195), fontSize: 16, fontWeight: FontWeight.w600),
                   ),
                   const Spacer(),
                   IconButton(
@@ -371,7 +423,7 @@ class _CalculatorItemCardState extends State<_CalculatorItemCard> {
 
               const SizedBox(height: 12),
 
-              // СТРОКА 4: Скидка (%, Руб, Итого) - без кнопки сброса
+              // СТРОКА 4: Скидка (%, Руб, Итого)
               Row(
                 children: [
                   Expanded(child: TextField(controller: _percentCtrl, focusNode: _percentFocus, keyboardType: TextInputType.number, inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]'))], decoration: const InputDecoration(labelText: '%', isDense: true, border: OutlineInputBorder()), onChanged: (v) => CalculatorManager.instance.updatePercent(widget.item.productId, v))),
@@ -437,6 +489,7 @@ class _CalculatorItemCardState extends State<_CalculatorItemCard> {
             ],
           ),
         ),
-      );
+      ),
+    );
   }
 }

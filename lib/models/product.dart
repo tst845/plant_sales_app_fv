@@ -1,4 +1,19 @@
 // lib/models/product.dart
+
+// НОВЫЙ КЛАСС: Модель действующего вещества
+class ProductActiveIngredient {
+  final String name;
+  final double? concentration;
+  final String unit;
+
+  ProductActiveIngredient({
+    required this.name,
+    this.concentration,
+    this.unit = '',
+  });
+}
+
+
 class Product {
   final int? id;
   final String name;
@@ -9,8 +24,9 @@ class Product {
   final String? consumptionRate;
   final double? price;
   final String? description;
-  final List<String> cultures;    // Теперь список
-  final List<String> diseases;    // Теперь список
+  final List<String> cultures;    
+  final List<String> diseases;    
+  final List<ProductActiveIngredient> activeIngredients; 
 
   Product({
     this.id,
@@ -24,11 +40,13 @@ class Product {
     this.description,
     this.cultures = const [],
     this.diseases = const [],
+    this.activeIngredients = const [],
   });
 
   factory Product.fromMap(Map<String, dynamic> map, {
     List<String> cultures = const [],
     List<String> diseases = const [],
+    List<ProductActiveIngredient> activeIngredients = const [],
   }) {
     return Product(
       id: map['id'] as int?,
@@ -42,6 +60,7 @@ class Product {
       description: map['description'] as String?,
       cultures: cultures,
       diseases: diseases,
+      activeIngredients: activeIngredients, 
     );
   }
 
@@ -70,6 +89,7 @@ class Product {
     String? description,
     List<String>? cultures,
     List<String>? diseases,
+    List<ProductActiveIngredient>? activeIngredients, 
   }) {
     return Product(
       id: id ?? this.id,
@@ -83,6 +103,7 @@ class Product {
       description: description ?? this.description,
       cultures: cultures ?? this.cultures,
       diseases: diseases ?? this.diseases,
+      activeIngredients: activeIngredients ?? this.activeIngredients, 
     );
   }
 

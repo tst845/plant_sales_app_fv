@@ -174,11 +174,13 @@ class CalculatorManager {
         } else if (rub != null) {
           e.rub = rub;
           e.finalPrice = base - rub;
-          e.percent = (rub / base) * 100;
+          // ОКРУГЛЕНИЕ: до 2 знаков после запятой
+          e.percent = double.parse(((rub / base) * 100).toStringAsFixed(2));
         } else if (finalPrice != null) {
           e.finalPrice = finalPrice;
           e.rub = base - finalPrice;
-          e.percent = (e.rub! / base) * 100;
+          // ОКРУГЛЕНИЕ: до 2 знаков после запятой
+          e.percent = double.parse(((e.rub! / base) * 100).toStringAsFixed(2));
         }
       }
       return e;
@@ -215,4 +217,12 @@ class CalculatorManager {
   }
 
   void clearAll() => items.value = [];
+
+  void reorderItems(int oldIndex, int newIndex) {
+    final list = List<CalcItem>.from(items.value);
+    if (newIndex > oldIndex) newIndex -= 1;
+    final item = list.removeAt(oldIndex);
+    list.insert(newIndex, item);
+    items.value = list;
+  }
 }

@@ -53,4 +53,15 @@ class OrderManager {
     isSyncedWithCalculator.value = false;
     editingOrderId = null;
   }
+
+  void reorderItems(int oldIndex, int newIndex) {
+    if (activeOrder.value == null) return;
+    final list = List<OrderItem>.from(activeOrder.value!.items);
+    if (newIndex > oldIndex) newIndex -= 1;
+    final item = list.removeAt(oldIndex);
+    list.insert(newIndex, item);
+    activeOrder.value = activeOrder.value!.copyWith(items: list);
+  }
+
+
 }

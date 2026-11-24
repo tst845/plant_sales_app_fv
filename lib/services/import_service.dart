@@ -48,6 +48,45 @@ class ImportService {
     ],
   };
 
+  /// Проверяет, является ли строка разделителем категории.
+  /// Возвращает название категории, если строка — разделитель, иначе null.
+  ///
+  /// Критерии разделителя:
+  /// 1. Не более 2 непустых ячеек (у препарата всегда заполнено 4–7).
+  /// 2. Хотя бы одна непустая ячейка содержит текст ≤50 символов и ≤5 слов,
+  ///    который нормализуется в известный тип препарата.
+  /// Это отсекает ложные срабатывания на длинных описаниях состава
+  /// (например, «Микробиологический фунгицид для защиты...»).
+  static String? _detectCategoryInRow(List<Data?> row, int nameIdx) {
+    // 1. Строка должна быть почти пустой
+    int nonEmptyCount = 0;
+    for (int c = 0; c < row.length; c++) {
+      final val = row[c]?.value?.toString().trim() ?? '';
+      if (val.isNotEmpty) nonEmptyCount++;
+    }
+    if (nonEmptyCount > 2) return null;
+
+    // 2. Ищем короткий текст, который нормализуется в известный тип
+    for (int c = 0; c < row.length; c++) {
+      final val = row[c]?.value?.toString().trim() ?? '';
+      if (val.isEmpty) continue;
+      if (val.length > 50) continue;
+
+      // НЕ считаем разделителем служебные строки
+      final upper = val.toUpperCase();
+      if (upper.startsWith('ИТОГО') ||
+          upper.startsWith('ВСЕГО') ||
+          upper.startsWith('СУММА') ||
+          upper.startsWith('ПРИМЕЧАНИЕ')) {
+        continue;
+      }
+
+      final norm = DataNormalizer.normalizeProductType(val);
+      if (norm != 'Другое') return norm;
+    }
+    return null;
+  }
+
   // === 1. АНАЛИЗ ЛИСТА (Скоринг шапки) ===
   static SheetConfig? analyzeSheet(Sheet sheet, String sheetName) {
     int bestScore = 0;
@@ -121,17 +160,12 @@ class ImportService {
     if (!hasCategoryCol) {
       for (var row in dataRows) {
         if (row.isEmpty) continue;
-        for (int i = 0; i < row.length; i++) {
-          if (i == selectedColumns['name']) continue;
-          final val = row[i]?.value?.toString() ?? '';
-          final normType = DataNormalizer.normalizeProductType(val);
-          if (normType != 'Другое' && !detectedCats.contains(normType)) {
-             detectedCats.add(normType);
-          }
+        final cat = _detectCategoryInRow(row, selectedColumns['name'] ?? -1);
+        if (cat != null && !detectedCats.contains(cat)) {
+          detectedCats.add(cat);
         }
       }
     }
-
     return SheetConfig(
       sheetName: sheetName,
       format: hasCategoryCol ? 'catalog' : 'pricelist',
@@ -153,8 +187,10 @@ class ImportService {
     SheetStats stats, {
     required List<String> knownCultures,
     required List<String> knownDiseases,
+    required List<String> knownActiveIngredients,
     required bool ignoreEmptyCells,
   }) {
+
     final List<Product> products = [];
     final int nameIdx = config.selectedColumns['name'] ?? -1;
     if (nameIdx == -1) return products;
@@ -177,22 +213,13 @@ class ImportService {
 
       String getCell(int idx) => (idx != -1 && idx < row.length) ? (row[idx]?.value?.toString().trim() ?? '') : '';
 
-      // 1. Проверяем на строку-разделитель (только если колонки "Категория" нет)
+      /// 1. Проверяем на строку-разделитель (только если колонки "Категория" нет)
       if (config.categorySource != CategorySource.column) {
-        bool isSeparator = false;
-        for (int c = 0; c < row.length; c++) {
-          if (c == nameIdx) continue; // не считаем колонку с названием
-          final val = getCell(c);
-          if (val.isNotEmpty) {
-            final norm = DataNormalizer.normalizeProductType(val);
-            if (norm != 'Другое') {
-              currentCategory = norm; // Обновили категорию
-              isSeparator = true;
-              break;
-            }
-          }
+        final cat = _detectCategoryInRow(row, nameIdx);
+        if (cat != null) {
+          currentCategory = cat;
+          continue;
         }
-        if (isSeparator) continue; // Переходим к следующей строке
       }
 
       // 2. Парсим препарат
@@ -205,7 +232,9 @@ class ImportService {
 
       stats.totalRows++;
 
-      final category = (config.categorySource == CategorySource.column) ? getCell(categoryIdx) : currentCategory;
+      // Нормализуем категорию (приводим к единственному числу и исправляем опечатки)
+      final rawCategory = getCell(categoryIdx);
+      final category = DataNormalizer.normalizeProductType(rawCategory);
       final composition = getCell(compIdx);
       final manufacturer = getCell(manIdx);
       final package = getCell(packIdx);
@@ -256,6 +285,36 @@ class ImportService {
          }
       }
 
+      final compositionStr = getCell(compIdx);
+      
+      // НОВАЯ ЛОГИКА ПАРСИНГА ДВ
+      List<ProductActiveIngredient> parsedAIs = [];
+      if (compositionStr.isNotEmpty) {
+        final rawIngredients = DataNormalizer.parseComposition(compositionStr);
+        for (var item in rawIngredients) {
+          final rawName = item['substance'] ?? '';
+          // Нормализуем название ДВ
+          final normName = DataNormalizer.normalizeActiveIngredientName(rawName, knownActiveIngredients);
+          
+          if (normName.isNotEmpty) {
+            final qtyStr = item['qty'];
+            final qty = qtyStr != null && qtyStr.isNotEmpty ? double.tryParse(qtyStr.replaceAll(',', '.')) : null;
+            
+            parsedAIs.add(ProductActiveIngredient(
+              name: normName,
+              concentration: qty,
+              unit: item['unit'] ?? '',
+            ));
+            
+            // Если это новое ДВ, запоминаем его для следующих строк
+            if (!knownActiveIngredients.contains(normName)) {
+              knownActiveIngredients.add(normName);
+            }
+          }
+        }
+      }
+
+
       products.add(Product(
         name: name,
         category: category, // Может быть пустым, проверим при сохранении
@@ -267,6 +326,7 @@ class ImportService {
         description: description.isNotEmpty ? description : null,
         cultures: cultures,
         diseases: diseases,
+        activeIngredients: parsedAIs,
       ));
       stats.accepted++;
     }
@@ -428,6 +488,8 @@ class ImportService {
                 description: p.description ?? existingProduct.description,
                 cultures: p.cultures.isNotEmpty ? p.cultures : existingProduct.cultures,
                 diseases: p.diseases.isNotEmpty ? p.diseases : existingProduct.diseases,
+                // НОВОЕ: берем новые ДВ, если они были в файле, иначе оставляем пустыми (они не перезапишут БД, так как мы будем удалять только если список не пуст)
+                activeIngredients: p.activeIngredients.isNotEmpty ? p.activeIngredients : [], 
               );
               await db.updateProductWithExecutor(mergedProduct, txn);
               updated++;

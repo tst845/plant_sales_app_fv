@@ -22,6 +22,8 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
   final _clientCtrl = TextEditingController();
   final _shipmentCtrl = TextEditingController();
   final _notesCtrl = TextEditingController();
+
+  bool _isReorderMode = false;
   
   DateTime _orderDate = DateTime.now();
   String _status = 'Новый';
@@ -244,6 +246,11 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
       appBar: AppBar(
         title: Text(widget.order == null ? 'Новый заказ' : 'Редактирование'),
         actions: [
+          if (_isReorderMode)
+            TextButton(
+              onPressed: () => setState(() => _isReorderMode = false),
+              child: const Text('Готово', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold)),
+            ),
           if (widget.order != null || OrderManager.instance.activeOrder.value?.id != null)
             IconButton(
               icon: const Icon(Icons.delete, color: Colors.red),
@@ -396,32 +403,46 @@ class _OrderEditScreenState extends State<OrderEditScreen> {
           
           if (currentItems.isEmpty)
             const Center(child: Text('Список препаратов пуст', style: TextStyle(color: Colors.grey)))
-          else
-            ...currentItems.asMap().entries.map((entry) {
-              int idx = entry.key;
-              var orderItem = entry.value;
-              return _OrderItemCard(
-                key: ValueKey('${orderItem.productId}_$idx'),
-                item: orderItem,
-                onChanged: (updatedItem) {
-                   var newList = List<OrderItem>.from(currentItems);
-                   newList[idx] = updatedItem;
-                   OrderManager.instance.updateItems(newList);
-                   if (OrderManager.instance.isSyncedWithCalculator.value) {
+          else 
+            ReorderableListView.builder(
+              shrinkWrap: true, // Важно, так как внутри другого ListView
+              physics: const NeverScrollableScrollPhysics(), // Скроллит родительский ListView
+              buildDefaultDragHandles: false,
+              itemCount: currentItems.length,
+              onReorder: (oldIndex, newIndex) {
+                OrderManager.instance.reorderItems(oldIndex, newIndex);
+                if (OrderManager.instance.isSyncedWithCalculator.value) {
+                  CalculatorManager.instance.syncWithOrderItems(OrderManager.instance.activeOrder.value!.items);
+                }
+              },
+              itemBuilder: (context, idx) {
+                var orderItem = currentItems[idx];
+                return _OrderItemCard(
+                  key: ValueKey('${orderItem.productId}_$idx'),
+                  item: orderItem,
+                  index: idx,
+                  isReorderMode: _isReorderMode,
+                  onLongPress: () => setState(() => _isReorderMode = true),
+                  onChanged: (updatedItem) {
+                    var newList = List<OrderItem>.from(currentItems);
+                    newList[idx] = updatedItem;
+                    OrderManager.instance.updateItems(newList);
+                    if (OrderManager.instance.isSyncedWithCalculator.value) {
                       CalculatorManager.instance.syncWithOrderItems(newList);
                     }
-                },
-                onDelete: () {
-                   var newList = List<OrderItem>.from(currentItems);
-                   newList.removeAt(idx);
-                   OrderManager.instance.updateItems(newList);
-                   if (OrderManager.instance.isSyncedWithCalculator.value) {
+                  },
+                  onDelete: () {
+                    var newList = List<OrderItem>.from(currentItems);
+                    newList.removeAt(idx);
+                    OrderManager.instance.updateItems(newList);
+                    if (OrderManager.instance.isSyncedWithCalculator.value) {
                       CalculatorManager.instance.syncWithOrderItems(newList);
                     }
-                },
-              );
-            }),
-        ],
+                  },
+                );
+              },
+            ),
+        ]
       ),
       bottomNavigationBar: _buildBottomPanel(),
     );
@@ -461,8 +482,19 @@ class _OrderItemCard extends StatefulWidget {
   final OrderItem item;
   final Function(OrderItem) onChanged;
   final VoidCallback onDelete;
+  final int index;
+  final bool isReorderMode;
+  final VoidCallback onLongPress;
 
-  const _OrderItemCard({super.key, required this.item, required this.onChanged, required this.onDelete});
+  const _OrderItemCard({
+    super.key,
+    required this.item,
+    required this.onChanged,
+    required this.onDelete,
+    required this.index,
+    required this.isReorderMode,
+    required this.onLongPress,
+  });
 
   @override
   State<_OrderItemCard> createState() => _OrderItemCardState();
@@ -521,123 +553,139 @@ class _OrderItemCardState extends State<_OrderItemCard> {
   @override
   Widget build(BuildContext context) {
     final double discountedPrice = widget.item.discountedPrice;
-    final double requiredVolume = widget.item.requiredVolume;
-    // final int packagesCount = widget.item.packagesCount;
     final double totalCost = widget.item.totalPrice;
 
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(child: Text(widget.item.productName, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.green))),
-                IconButton(icon: const Icon(Icons.close, color: Colors.red), onPressed: widget.onDelete, visualDensity: VisualDensity.compact),
-              ],
-            ),
-            const Divider(),
-            Wrap(
-              spacing: 16,
-              runSpacing: 4,
-              children: [
-                Text('Цена: ${widget.item.basePrice.toStringAsFixed(2)} ₽', style: const TextStyle(fontSize: 13, color: Colors.grey)),
-                if (widget.item.discountPercent > 0) 
-                  Text('Скидка: -${widget.item.discountPercent.toStringAsFixed(1)}%', style: const TextStyle(fontSize: 13, color: Colors.red)),
-                Text('Со скидкой: ${discountedPrice.toStringAsFixed(2)} ₽', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.blue)),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: TextFormField(
-                    controller: _areaCtrl,
-                    focusNode: _areaFocus,
-                    decoration: const InputDecoration(labelText: 'Площадь, га', isDense: true, border: OutlineInputBorder()),
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                    onChanged: (val) {
-                      final newArea = double.tryParse(val.replaceAll(',', '.')) ?? 0.0;
-                      widget.onChanged(widget.item.copyWith(area: newArea));
-                    },
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: TextFormField(
-                    controller: _rateCtrl,
-                    focusNode: _rateFocus,
-                    decoration: const InputDecoration(labelText: 'Норма, на га', isDense: true, border: OutlineInputBorder()),
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                    onChanged: (val) {
-                      final newRate = double.tryParse(val.replaceAll(',', '.')) ?? 0.0;
-                      widget.onChanged(widget.item.copyWith(rate: newRate));
-                    },
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: TextFormField(
-                    controller: _volumeCtrl,
-                    focusNode: _volumeFocus,
-                    decoration: InputDecoration(labelText: 'Требуется, ${widget.item.packageUnit}', isDense: true, border: const OutlineInputBorder()),
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                    onChanged: (val) {
-                      final newVolume = double.tryParse(val.replaceAll(',', '.')) ?? 0.0;
-                      // Пересчитываем площадь: area = volume / rate
-                      if (widget.item.rate > 0) {
-                        final newArea = newVolume / widget.item.rate;
-                        widget.onChanged(widget.item.copyWith(area: newArea));
-                      }
-                    },
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            // НОВАЯ СТРОКА ДЛЯ СКИДКИ
-            Row(
-              children: [
-                Expanded(
-                  flex: 2,
-                  child: TextFormField(
-                    controller: _discountCtrl,
-                    focusNode: _discountFocus,
-                    decoration: const InputDecoration(labelText: 'Скидка, %', isDense: true, border: OutlineInputBorder()),
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                    onChanged: (val) {
-                      final newDiscount = double.tryParse(val.replaceAll(',', '.')) ?? 0.0;
-                      widget.onChanged(widget.item.copyWith(discountPercent: newDiscount));
-                    },
-                  ),
-                ),
-                const SizedBox(width: 8),
-                // Блок со стоимостью
-                Expanded(
-                  flex: 2,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
-                    decoration: BoxDecoration(
-                      color: Colors.green.shade50,
-                      borderRadius: BorderRadius.circular(4),
-                      border: Border.all(color: Colors.green.shade200),
+    return GestureDetector(
+      onLongPress: widget.onLongPress,
+      child: Card(
+        margin: const EdgeInsets.only(bottom: 12),
+        elevation: 2,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  // Если включен режим сортировки, показываем ручку
+                  if (widget.isReorderMode) ...[
+                    ReorderableDragStartListener(
+                      index: widget.index,
+                      child: const Padding(
+                        padding: EdgeInsets.only(right: 8.0),
+                        child: Icon(Icons.drag_handle, color: Colors.grey),
+                      ),
                     ),
-                    child: Center(
-                      child: Text(
-                        '${totalCost.toStringAsFixed(2)} ₽',
-                        style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 16),
+                  ],
+                  Expanded(
+                    child: Text(
+                      widget.item.productName, 
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.green)
+                    )
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.red), 
+                    onPressed: widget.onDelete, 
+                    visualDensity: VisualDensity.compact
+                  ),
+                ],
+              ),
+              const Divider(),
+              Wrap(
+                spacing: 16,
+                runSpacing: 4,
+                children: [
+                  Text('Цена: ${widget.item.basePrice.toStringAsFixed(2)} ₽', style: const TextStyle(fontSize: 13, color: Colors.grey)),
+                  if (widget.item.discountPercent > 0) 
+                    Text('Скидка: -${widget.item.discountPercent.toStringAsFixed(1)}%', style: const TextStyle(fontSize: 13, color: Colors.red)),
+                  Text('Со скидкой: ${discountedPrice.toStringAsFixed(2)} ₽', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.blue)),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextFormField(
+                      controller: _areaCtrl,
+                      focusNode: _areaFocus,
+                      decoration: const InputDecoration(labelText: 'Площадь, га', isDense: true, border: OutlineInputBorder()),
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      onChanged: (val) {
+                        final newArea = double.tryParse(val.replaceAll(',', '.')) ?? 0.0;
+                        widget.onChanged(widget.item.copyWith(area: newArea));
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextFormField(
+                      controller: _rateCtrl,
+                      focusNode: _rateFocus,
+                      decoration: const InputDecoration(labelText: 'Норма, на га', isDense: true, border: OutlineInputBorder()),
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      onChanged: (val) {
+                        final newRate = double.tryParse(val.replaceAll(',', '.')) ?? 0.0;
+                        widget.onChanged(widget.item.copyWith(rate: newRate));
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextFormField(
+                      controller: _volumeCtrl,
+                      focusNode: _volumeFocus,
+                      decoration: InputDecoration(labelText: 'Требуется, ${widget.item.packageUnit}', isDense: true, border: const OutlineInputBorder()),
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      onChanged: (val) {
+                        final newVolume = double.tryParse(val.replaceAll(',', '.')) ?? 0.0;
+                        if (widget.item.rate > 0) {
+                          final newArea = newVolume / widget.item.rate;
+                          widget.onChanged(widget.item.copyWith(area: newArea));
+                        }
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    flex: 2,
+                    child: TextFormField(
+                      controller: _discountCtrl,
+                      focusNode: _discountFocus,
+                      decoration: const InputDecoration(labelText: 'Скидка, %', isDense: true, border: OutlineInputBorder()),
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      onChanged: (val) {
+                        final newDiscount = double.tryParse(val.replaceAll(',', '.')) ?? 0.0;
+                        widget.onChanged(widget.item.copyWith(discountPercent: newDiscount));
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    flex: 2,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: Colors.green.shade50,
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(color: Colors.green.shade200),
+                      ),
+                      child: Center(
+                        child: Text(
+                          '${totalCost.toStringAsFixed(2)} ₽',
+                          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 16),
+                        ),
                       ),
                     ),
                   ),
-                ),
-              ],
-            ),
-           
-          ],
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );

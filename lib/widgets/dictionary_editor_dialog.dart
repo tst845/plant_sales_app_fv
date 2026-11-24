@@ -20,18 +20,21 @@ class _DictionaryEditorDialogState extends State<DictionaryEditorDialog> {
     'categories': [],
     'cultures': [],
     'diseases': [],
+    'active_ingredients': [],
   };
 
   String _getTableName(int tab) {
     if (tab == 0) return 'categories';
     if (tab == 1) return 'cultures';
-    return 'diseases';
+    if (tab == 2) return 'diseases';
+    return 'active_ingredients'; // <-- НОВОЕ
   }
 
   String _getTabTitle(int tab) {
     if (tab == 0) return 'Типы препаратов';
     if (tab == 1) return 'Культуры';
-    return 'Болезни';
+    if (tab == 2) return 'Болезни';
+    return 'Действующие вещества'; // <-- НОВОЕ
   }
 
   @override
@@ -44,7 +47,7 @@ class _DictionaryEditorDialogState extends State<DictionaryEditorDialog> {
     setState(() => _isLoading = true);
     final db = await DatabaseHelper.instance.database;
 
-    for (var table in ['categories', 'cultures', 'diseases']) {
+    for (var table in ['categories', 'cultures', 'diseases', 'active_ingredients']) {
       final rows = await db.query(table, orderBy: 'name ASC');
       _data[table] = rows.map((r) => EditableDictItem(
         id: r['id'] as int,
@@ -247,14 +250,19 @@ class _DictionaryEditorDialogState extends State<DictionaryEditorDialog> {
             children: [
               // --- ВЕРХНЕЕ МЕНЮ (ВКЛАДКИ) ---
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    _buildTabButton(0, 'Типы'),
-                    _buildTabButton(1, 'Культуры'),
-                    _buildTabButton(2, 'Болезни'),
-                  ],
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 8),
+                      _buildTabButton(0, 'Типы'),
+                      _buildTabButton(1, 'Культуры'),
+                      _buildTabButton(2, 'Болезни'),
+                      _buildTabButton(3, 'Действующие вещества'), // <-- НОВОЕ
+                      const SizedBox(width: 8),
+                    ],
+                  ),
                 ),
               ),
               const Divider(height: 1),
@@ -305,21 +313,20 @@ class _DictionaryEditorDialogState extends State<DictionaryEditorDialog> {
 
   Widget _buildTabButton(int index, String title) {
     final isSelected = _currentTab == index;
-    return Expanded(
-      child: GestureDetector(
-        onTap: () => _onTabSelected(index),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          decoration: BoxDecoration(
-            border: Border(bottom: BorderSide(color: isSelected ? Colors.green : Colors.transparent, width: 3)),
-          ),
-          child: Text(
-            title,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-              color: isSelected ? Colors.green : Colors.grey.shade700,
-            ),
+    return GestureDetector(
+      onTap: () => _onTabSelected(index),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        margin: const EdgeInsets.symmetric(horizontal: 4),
+        decoration: BoxDecoration(
+          border: Border(bottom: BorderSide(color: isSelected ? Colors.green : Colors.transparent, width: 3)),
+        ),
+        child: Text(
+          title,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+            color: isSelected ? Colors.green : Colors.grey.shade700,
           ),
         ),
       ),

@@ -156,27 +156,151 @@ class DataNormalizer {
   }
 
   /// Парсинг строки состава (без изменений)
+    // 1. Словарь для замены похожих кириллических символов на латиницу (для хим. формул)
+  static const Map<String, String> _cyrillicToLatin = {
+    'А': 'A', 'В': 'B', 'С': 'C', 'Е': 'E', 'Н': 'H', 'К': 'K', 'М': 'M', 
+    'О': 'O', 'Р': 'P', 'Т': 'T', 'Х': 'X', 'а': 'a', 'с': 'c', 'е': 'e', 
+    'о': 'o', 'р': 'p', 'х': 'x'
+  };
+
+  /// Очищает название ДВ: заменяет кириллицу на латиницу (если это формула),
+  /// делает первую букву заглавной.
+  static String cleanActiveIngredient(String raw) {
+    String cleaned = raw.trim().replaceAll(RegExp(r'\s+'), ' ');
+    if (cleaned.isEmpty) return cleaned;
+
+    // Если строка короткая и без пробелов (похожа на формулу типа CaO, N, P2O5)
+    if (cleaned.length <= 5 && !cleaned.contains(' ')) {
+      final buffer = StringBuffer();
+      for (int i = 0; i < cleaned.length; i++) {
+        buffer.write(_cyrillicToLatin[cleaned[i]] ?? cleaned[i]);
+      }
+      cleaned = buffer.toString();
+    }
+    
+    // Делаем первую букву заглавной, остальные строчными
+    if (cleaned.isNotEmpty) {
+      cleaned = cleaned[0].toUpperCase() + cleaned.substring(1).toLowerCase();
+    }
+    
+    return cleaned;
+  }
+
+  /// Расстояние Левенштейна для поиска опечаток
+  static int _levenshtein(String a, String b) {
+    a = a.toLowerCase();
+    b = b.toLowerCase();
+    if (a == b) return 0;
+    if (a.isEmpty) return b.length;
+    if (b.isEmpty) return a.length;
+
+    List<int> v0 = List<int>.generate(b.length + 1, (i) => i);
+    List<int> v1 = List<int>.filled(b.length + 1, 0);
+
+    for (int i = 0; i < a.length; i++) {
+      v1[0] = i + 1;
+      for (int j = 0; j < b.length; j++) {
+        int cost = (a[i] == b[j]) ? 0 : 1;
+        v1[j + 1] = [v1[j] + 1, v0[j + 1] + 1, v0[j] + cost].reduce((x, y) => x < y ? x : y);
+      }
+      v0 = List.from(v1);
+    }
+    return v1[b.length];
+  }
+
+  /// Умная нормализация названия ДВ с учетом существующих в БД
+  static String normalizeActiveIngredientName(String input, List<String> knownIngredients) {
+    final cleaned = cleanActiveIngredient(input);
+    if (cleaned.isEmpty) return '';
+
+    // 1. Точное совпадение
+    for (final known in knownIngredients) {
+      if (known.toLowerCase() == cleaned.toLowerCase()) return known;
+    }
+
+    // 2. Если это короткая формула (<= 4 символов) - строгое совпадение, никаких опечаток
+    if (cleaned.length <= 4) {
+      return cleaned; // Не нашли точного - возвращаем как новое
+    }
+
+    // 3. Для длинных названий ищем с допуском (1 ошибка для <10 символов, 2 для >=10)
+    final allowedDistance = cleaned.length < 10 ? 1 : 2;
+    for (final known in knownIngredients) {
+      if (_levenshtein(known, cleaned) <= allowedDistance) {
+        return known;
+      }
+    }
+
+    return cleaned;
+  }
+
+  /// Универсальный парсер состава
   static List<Map<String, String>> parseComposition(String? composition) {
     if (composition == null || composition.isEmpty) return [];
+    
     final result = <Map<String, String>>[];
-    final parts = composition.split(';');
+    
+    // Готовим текст: убираем переносы строк, приводим к одному пробелу
+    String text = composition.replaceAll(RegExp(r'[\r\n]+'), ' ').trim();
+
+    // Ищем глобальную единицу измерения в конце, например "(%)"
+    String globalUnit = '';
+    final globalUnitMatch = RegExp(r'\(([^)]+)\)\s*$').firstMatch(text);
+    if (globalUnitMatch != null) {
+      final possibleUnit = globalUnitMatch.group(1)!.trim();
+      if (['%', 'г/л', 'г/кг', 'мл/л'].contains(possibleUnit)) {
+        globalUnit = possibleUnit;
+        text = text.substring(0, globalUnitMatch.start).trim(); // Отрезаем "(%)"
+      }
+    }
+
+    // Разбиваем по + или ; (запятые не трогаем, это десятичные дроби)
+    final parts = text.split(RegExp(r'[+;]'));
+
+    // Регулярка для поиска "Число Единица" (например: 62,5 г/л)
+    final numberUnitRegex = RegExp(r'([\d.,]+)\s*(г/л|г/кг|г/га|кг/га|мл/л|мл/га|л/га|%)', caseSensitive: false);
+    
+    // Регулярка для поиска в скобках (например: N (15,0 %) или N (15,0))
+    final bracketRegex = RegExp(r'([A-Za-zА-Яа-яЁё0-9\-\s]+)\s*\(\s*([\d.,]+)\s*([^)]*)\s*\)');
 
     for (final part in parts) {
       final trimmed = part.trim();
       if (trimmed.isEmpty) continue;
 
-      final words = trimmed.split(' ');
-      if (words.length >= 3) {
-        final unit = words.last;
-        final qty = words[words.length - 2];
-        final substance = words.sublist(0, words.length - 2).join(' ');
+      // Проверяем формат "Название (Число Единица)"
+      final bracketMatch = bracketRegex.firstMatch(trimmed);
+      if (bracketMatch != null) {
+        final name = bracketMatch.group(1)!.trim();
+        final qty = bracketMatch.group(2)!.replaceAll(',', '.');
+        String unit = bracketMatch.group(3)!.trim();
+        if (unit.isEmpty) unit = globalUnit;
+        
+        if (name.isNotEmpty) {
+          result.add({'substance': name, 'qty': qty, 'unit': unit});
+          continue;
+        }
+      }
+
+      // Проверяем стандартный формат "Название Число Единица" или "Число Единица Название"
+      final match = numberUnitRegex.firstMatch(trimmed);
+      if (match != null) {
+        final qty = match.group(1)!.replaceAll(',', '.');
+        final unit = match.group(2)!;
+        
+        // Удаляем найденное число и единицу, чтобы получить название
+        String substance = trimmed.replaceAll(match.group(0)!, '').trim();
+        // Очищаем от лишних символов по краям (-, :, пробелы)
+        substance = substance.replaceAll(RegExp(r'^[-+:\s]+|[-+:\s]+$'), '').trim();
+
+        if (substance.isEmpty) substance = 'Неизвестное вещество';
+
         result.add({'substance': substance, 'qty': qty, 'unit': unit});
-      } else if (words.length == 2) {
-        result.add({'substance': words[0], 'qty': words[1], 'unit': ''});
       } else {
+        // Если числа нет вообще (например, "Антидот")
         result.add({'substance': trimmed, 'qty': '', 'unit': ''});
       }
     }
+
     return result;
   }
 }

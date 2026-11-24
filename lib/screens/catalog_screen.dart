@@ -227,7 +227,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
   // ЭКСПОРТ (С ДИАЛОГОВЫМ ОКНОМ)
   // ============================================================
     // --- ВЫНЕСЕННЫЙ МЕТОД ЭКСПОРТА ---
-    Future<void> _exportProductsToExcel(List<Product> productsToExport, String title) async {
+  Future<void> _exportProductsToExcel(List<Product> productsToExport, String title) async {
     if (productsToExport.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Нет данных для экспорта (список пуст)')));
       return;
@@ -443,6 +443,52 @@ class _CatalogScreenState extends State<CatalogScreen> {
         if (mounted) Navigator.of(context, rootNavigator: true).pop();
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Ошибка: $e')));
       }
+  }
+
+
+  Future<void> _deleteSelectedProducts() async {
+    if (_selectedIds.isEmpty) return;
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Удаление препаратов'),
+        content: Text('Вы уверены, что хотите удалить выбранные препараты (${_selectedIds.length} шт.)?\n\nЭто действие нельзя отменить.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Удалить', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    try {
+      await DatabaseHelper.instance.deleteProducts(_selectedIds.toList());
+      
+      if (mounted) {
+        setState(() {
+          _isSelectionMode = false;
+          _isSelectionConfirmed = false;
+          _selectedIds.clear();
+        });
+        DatabaseHelper.dbUpdateTrigger.value++; // Обновляем каталог
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Препараты успешно удалены'), backgroundColor: Colors.green),
+        );
+      }
+    } catch (e, st) {
+      AppLogger().e('Каталог: ошибка массового удаления', error: e, stackTrace: st);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка удаления: $e')),
+        );
+      }
+    }
   }
 
   // Обертка для вызова из AppBar
@@ -862,6 +908,16 @@ class _CatalogScreenState extends State<CatalogScreen> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
+                // Кнопка удаления
+                FloatingActionButton.extended(
+                  heroTag: 'delete_fab',
+                  onPressed: _deleteSelectedProducts,
+                  icon: const Icon(Icons.delete_forever),
+                  label: Text('Удалить (${_selectedIds.length})'),
+                  backgroundColor: Colors.red.shade700,
+                  foregroundColor: Colors.white,
+                ),
+                const SizedBox(height: 12),
                 // Скрываем экспорт, если мы в режиме выбора для заказа
                 if (!widget.isOrderSelectionMode) ...[
                   FloatingActionButton.extended(
@@ -876,6 +932,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
                     foregroundColor: Colors.white,
                   ),
                   const SizedBox(height: 12),
+                  
                   FloatingActionButton.extended(
                     heroTag: 'calc_fab',
                     onPressed: () {
@@ -913,7 +970,6 @@ class _CatalogScreenState extends State<CatalogScreen> {
                 ],
 
                 // Кнопка подтверждения (В заказ / Добавить)
-                                // Кнопка подтверждения (В заказ / Добавить)
                 FloatingActionButton.extended(
                   heroTag: 'order_fab',
                   onPressed: () {
@@ -1007,7 +1063,7 @@ class _CatalogScreenState extends State<CatalogScreen> {
     );
   }
 
-  Widget _buildProductCard(Product product, List<CalcItem> calcItems) {
+    Widget _buildProductCard(Product product, List<CalcItem> calcItems) {
     String consumptionWithUnit = _formatConsumptionRate(product.consumptionRate, product.package);
 
     CalcItem? calcItem;
@@ -1015,74 +1071,162 @@ class _CatalogScreenState extends State<CatalogScreen> {
       calcItem = calcItems.firstWhere((item) => item.productId == product.id);
     } catch (_) {}
 
-    // Определяем единицу для отображения (л или кг)
     String unitStr = 'л';
     if (product.package != null && product.package!.toLowerCase().contains('кг')) {
       unitStr = 'кг';
     }
-
     final isInCalc = calcItem != null;
 
-    // Виджет с ценами (выносим отдельно для чистоты)
     Widget? priceWidget;
+    // ... (Блок формирования priceWidget остается без изменений) ...
     if (product.price != null) {
       if (isInCalc && calcItem.finalPrice != null) {
-        // Если есть скидка в калькуляторе
         priceWidget = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Wrap(
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                Text('${product.price!.toStringAsFixed(2)} ₽/$unitStr', 
-                  style: const TextStyle(decoration: TextDecoration.lineThrough, color: Colors.grey, fontSize: 13)),
+                Text('${product.price!.toStringAsFixed(2)} ₽/$unitStr', style: const TextStyle(decoration: TextDecoration.lineThrough, color: Colors.grey, fontSize: 13)),
                 const SizedBox(width: 4),
-                Text('- ${calcItem.percent!.toStringAsFixed(0)}%', 
-                  style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 13)),
+                Text('- ${calcItem.percent!.toStringAsFixed(0)}%', style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold, fontSize: 13)),
                 const SizedBox(width: 4),
-                Text('= ${calcItem.finalPrice!.toStringAsFixed(2)} ₽/$unitStr', 
-                  style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 15)),
+                Text('= ${calcItem.finalPrice!.toStringAsFixed(2)} ₽/$unitStr', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 15)),
               ],
             ),
             const SizedBox(height: 2),
-            // Цена за гектар (только если в калькуляторе)
             Wrap(
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                Text('(${(calcItem.basePrice * calcItem.rate).toStringAsFixed(2)} ₽/га)', 
-                  style: const TextStyle(decoration: TextDecoration.lineThrough, color: Colors.grey, fontSize: 12)),
+                Text('(${(calcItem.basePrice * calcItem.rate).toStringAsFixed(2)} ₽/га)', style: const TextStyle(decoration: TextDecoration.lineThrough, color: Colors.grey, fontSize: 12)),
                 const SizedBox(width: 4),
-                Text('- ${calcItem.percent!.toStringAsFixed(0)}%', 
-                  style: const TextStyle(color: Colors.red, fontSize: 12)),
+                Text('- ${calcItem.percent!.toStringAsFixed(0)}%', style: const TextStyle(color: Colors.red, fontSize: 12)),
                 const SizedBox(width: 4),
-                Text('= ${(calcItem.finalPrice! * calcItem.rate).toStringAsFixed(2)} ₽/га', 
-                  style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 13)),
+                Text('= ${(calcItem.finalPrice! * calcItem.rate).toStringAsFixed(2)} ₽/га', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 13)),
               ],
             ),
           ],
         );
       } else if (isInCalc) {
-        // В калькуляторе, но без скидки
         priceWidget = Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('${product.price!.toStringAsFixed(2)} ₽/$unitStr', 
-              style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 15)),
+            Text('${product.price!.toStringAsFixed(2)} ₽/$unitStr', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 15)),
             const SizedBox(height: 2),
-            Text('(${(calcItem.basePrice * calcItem.rate).toStringAsFixed(2)} ₽/га)', 
-              style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.green, fontSize: 13)),
+            Text('(${(calcItem.basePrice * calcItem.rate).toStringAsFixed(2)} ₽/га)', style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.green, fontSize: 13)),
           ],
         );
       } else {
-        // Не в калькуляторе
-        priceWidget = Text('${product.price!.toStringAsFixed(2)} ₽/$unitStr', 
-          style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 15));
+        priceWidget = Text('${product.price!.toStringAsFixed(2)} ₽/$unitStr', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green, fontSize: 15));
       }
+    }
+
+    // --- УСЛОВНАЯ ОТРИСОВКА КАРТОЧКИ ---
+    Widget cardContent;
+
+    if (_isSelectionMode) {
+      // Режим выбора: используем ListTile, который ловит тапы по всей площади
+      cardContent = ListTile(
+        onTap: _isSelectionConfirmed ? null : () => _toggleSelection(product.id!),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        leading: Checkbox(
+          value: _selectedIds.contains(product.id),
+          onChanged: _isSelectionConfirmed ? null : (_) => _toggleSelection(product.id!),
+          activeColor: Colors.green,
+        ),
+        title: Text(
+          product.name,
+          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 4),
+            Text(product.category, style: TextStyle(color: Colors.grey.shade700, fontSize: 13)),
+            if (priceWidget != null) ...[
+              const SizedBox(height: 4),
+              priceWidget,
+            ],
+          ],
+        ),
+        trailing: _isSelectionConfirmed && _selectedIds.contains(product.id)
+            ? const Icon(Icons.check_circle, color: Colors.green, size: 28)
+            : null,
+      );
+    } else {
+      // Обычный режим: используем ExpansionTile
+      cardContent = ExpansionTile(
+        title: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 8.0),
+                child: Text(
+                  product.name, 
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                  softWrap: true,
+                ),
+              ),
+            ),
+            IconButton(
+              icon: Icon(isInCalc ? Icons.remove_shopping_cart : Icons.calculate, size: 22),
+              color: isInCalc ? Colors.red.shade700 : Colors.grey.shade700,
+              onPressed: () {
+                if (!isInCalc) {
+                  final added = CalculatorManager.instance.addProduct(product);
+                  if (!added) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Достигнут лимит (50) или нет цены.')));
+                } else {
+                  CalculatorManager.instance.removeItem(product.id!);
+                }
+              },
+              tooltip: isInCalc ? 'Убрать из калькулятора' : 'В калькулятор',
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+              visualDensity: VisualDensity.compact,
+            ),
+          ],
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 4),
+            Text(product.category, style: TextStyle(color: Colors.grey.shade700, fontSize: 13)),
+            if (priceWidget != null) ...[
+              const SizedBox(height: 6),
+              priceWidget,
+            ],
+          ],
+        ),
+        trailing: const Icon(Icons.keyboard_arrow_down),
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Divider(),
+                if (product.composition != null && product.composition!.isNotEmpty) _buildDetailRow('Состав', product.composition!),
+                if (product.manufacturer != null && product.manufacturer!.isNotEmpty) _buildDetailRow('Производитель', product.manufacturer!),
+                if (product.package != null && product.package!.isNotEmpty) _buildDetailRow('Упаковка', product.package!),
+                if (consumptionWithUnit.isNotEmpty) _buildDetailRow('Норма расхода', consumptionWithUnit),
+                if (product.description != null && product.description!.isNotEmpty) _buildDetailRow('Описание', product.description!),
+                
+                if (product.cultures.isNotEmpty) 
+                  _buildDetailRow('Культуры', product.cultures.join(', ')),
+                if (product.diseases.isNotEmpty) 
+                  _buildDetailRow('Болезни', product.diseases.join(', ')),
+              ],
+            ),
+          ),
+        ],
+      );
     }
 
     return Dismissible(
       key: Key('product_${product.id}'),
-      direction: DismissDirection.endToStart,
+      // Блокируем свайп-удаление, пока идет выбор
+      direction: _isSelectionMode ? DismissDirection.none : DismissDirection.endToStart,
       background: Container(
         margin: const EdgeInsets.only(bottom: 10),
         decoration: BoxDecoration(color: Colors.red.shade400, borderRadius: BorderRadius.circular(12)),
@@ -1105,129 +1249,27 @@ class _CatalogScreenState extends State<CatalogScreen> {
       },
       onDismissed: (direction) async {
         if (product.id != null) {
-          try {
-            await DatabaseHelper.instance.deleteProduct(product.id!);
-            _loadData();
-          } catch (e, st) {
-            AppLogger().e(
-              'Каталог: ошибка удаления препарата "${product.name}" (id: ${product.id})',
-              error: e,
-              stackTrace: st,
-            );
-            if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Ошибка удаления: $e')),
-              );
-            }
-          }
+          await DatabaseHelper.instance.deleteProduct(product.id!);
+          _loadData();
         }
       },
       child: Card( 
         margin: const EdgeInsets.only(bottom: 10),
         elevation: 2,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        // Оборачиваем в GestureDetector для долгого нажатия
         child: GestureDetector(
           onLongPress: () {
-            HapticFeedback.vibrate(); // Легкая вибрация
-            // Переходим в режим редактирования
-            Navigator.push(
-              context,
-              MaterialPageRoute(builder: (context) => ProductFormScreen(product: product)),
-            ).then((result) {
-              if (result == true) _loadData();
-            });
+            if (!_isSelectionMode) {
+              HapticFeedback.vibrate();
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => ProductFormScreen(product: product)),
+              ).then((result) {
+                if (result == true) _loadData();
+              });
+            }
           },
-          child: InkWell(
-            onTap: (_isSelectionMode && !_isSelectionConfirmed) 
-                ? () => _toggleSelection(product.id!) 
-                : null, 
-            child: ExpansionTile(
-              onExpansionChanged: _isSelectionMode ? (_) {} : null,
-              // Заголовок с названием (кнопка редактирования удалена)
-              title: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (_isSelectionMode)
-                    Checkbox(
-                      value: _selectedIds.contains(product.id),
-                      onChanged: _isSelectionConfirmed 
-                          ? null 
-                          : (_) => _toggleSelection(product.id!),
-                    ),
-                  
-                  // Название (растягивается и переносит текст)
-                  Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.only(top: 8.0),
-                      child: Text(
-                        product.name, 
-                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                        softWrap: true,
-                      ),
-                    ),
-                  ),
-                  
-                  // Кнопка "В калькулятор" (остается)
-                  if (!_isSelectionMode)
-                    IconButton(
-                      icon: Icon(isInCalc ? Icons.remove_shopping_cart : Icons.calculate, size: 22),
-                      color: isInCalc ? Colors.red.shade700 : Colors.grey.shade700,
-                      onPressed: () {
-                        if (!isInCalc) {
-                          final added = CalculatorManager.instance.addProduct(product);
-                          if (!added) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Достигнут лимит (50) или нет цены.')));
-                        } else {
-                          CalculatorManager.instance.removeItem(product.id!);
-                        }
-                      },
-                      tooltip: isInCalc ? 'Убрать из калькулятора' : 'В калькулятор',
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
-                      visualDensity: VisualDensity.compact,
-                    ),
-                ],
-              ),
-              
-              // Подзаголовок (категория и цены)
-              subtitle: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const SizedBox(height: 4),
-                  Text(product.category, style: TextStyle(color: Colors.grey.shade700, fontSize: 13)),
-                  if (priceWidget != null) ...[
-                    const SizedBox(height: 6),
-                    priceWidget,
-                  ],
-                ],
-              ),
-              
-              trailing: _isSelectionMode ? null : const Icon(Icons.keyboard_arrow_down),
-              
-              // Детали препарата при разворачивании
-              children: _isSelectionMode ? [] : [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Divider(),
-                      if (product.composition != null && product.composition!.isNotEmpty) _buildDetailRow('Состав', product.composition!),
-                      if (product.manufacturer != null && product.manufacturer!.isNotEmpty) _buildDetailRow('Производитель', product.manufacturer!),
-                      if (product.package != null && product.package!.isNotEmpty) _buildDetailRow('Упаковка', product.package!),
-                      if (consumptionWithUnit.isNotEmpty) _buildDetailRow('Норма расхода', consumptionWithUnit),
-                      if (product.description != null && product.description!.isNotEmpty) _buildDetailRow('Описание', product.description!),
-                      
-                      if (product.cultures.isNotEmpty) 
-                        _buildDetailRow('Культуры', product.cultures.join(', ')),
-                      if (product.diseases.isNotEmpty) 
-                        _buildDetailRow('Болезни', product.diseases.join(', ')),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
+          child: cardContent, // Используем наш условный виджет
         ),
       ),
     );

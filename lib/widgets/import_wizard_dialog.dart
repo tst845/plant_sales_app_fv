@@ -30,6 +30,7 @@ class _ImportWizardDialogState extends State<ImportWizardDialog> {
   // Данные для парсинга
   List<String> _knownCultures = [];
   List<String> _knownDiseases = [];
+  List<String> _knownActiveIngredients = [];
 
   @override
   void initState() {
@@ -60,6 +61,8 @@ class _ImportWizardDialogState extends State<ImportWizardDialog> {
       final dbData = await DatabaseHelper.instance.getUniqueCulturesAndDiseases();
       _knownCultures = dbData['cultures'] ?? [];
       _knownDiseases = dbData['diseases'] ?? [];
+      // НОВОЕ:
+      _knownActiveIngredients = await DatabaseHelper.instance.getUniqueActiveIngredients();
 
       _state = ImportState(
         filePath: filePath,
@@ -171,6 +174,7 @@ class _ImportWizardDialogState extends State<ImportWizardDialog> {
           stats,
           knownCultures: _knownCultures,
           knownDiseases: _knownDiseases,
+          knownActiveIngredients: _knownActiveIngredients,
           ignoreEmptyCells: _state!.ignoreEmptyCells,
         );
 

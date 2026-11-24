@@ -16,6 +16,10 @@ import 'screens/catalog_screen.dart';
 import 'screens/order_manager.dart';
 import 'screens/orders_screen.dart';
 import 'screens/settings_screen.dart';
+
+import 'screens/analog_screen.dart';
+import 'screens/analog_manager.dart';
+
 import 'services/file_format_detector.dart';
 import 'services/order_import_service.dart';
 import 'services/share_intent_service.dart';
@@ -114,6 +118,7 @@ class _MainScreenState extends State<MainScreen> {
       const CatalogScreen(),
       const CalculatorScreen(),
       const OrdersScreen(),
+      const AnalogScreen(), 
       const SettingsScreen(),
     ];
 
@@ -250,6 +255,21 @@ class _MainScreenState extends State<MainScreen> {
             ),
             label: 'Заказы',
           ),
+          BottomNavigationBarItem(
+            icon: ValueListenableBuilder<List<AnalogTarget>>(
+              valueListenable: AnalogManager.instance.targets,
+              builder: (context, targets, child) {
+                return Badge(
+                  isLabelVisible: targets.isNotEmpty,
+                  label: Text('${targets.length}'),
+                  backgroundColor: Colors.purple,
+                  child: const Icon(Icons.swap_horiz),
+                );
+              },
+            ),
+            label: 'Аналоги',
+          ),
+          
           const BottomNavigationBarItem(
             icon: Icon(Icons.settings),
             label: 'Настройки',

@@ -61,6 +61,56 @@ class _OrdersScreenState extends State<OrdersScreen> {
     if (mounted) setState(() {});
   }
 
+  Future<Map<String, bool>?> _showColumnsSelectionDialog() async {
+    bool incName = true;
+    bool incBasePrice = true;
+    bool incDiscount = true;
+    bool incFinalPrice = true;
+    bool incRate = true;
+    bool incArea = true;
+    bool incVolume = true;
+    bool incTotal = true;
+
+    return await showDialog<Map<String, bool>>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setModalState) {
+          return AlertDialog(
+            title: const Text('Экспорт заказа в Excel'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('Выберите колонки для выгрузки:', style: TextStyle(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  CheckboxListTile(title: const Text('Наименование'), value: incName, onChanged: (v) => setModalState(() => incName = v!), dense: true, contentPadding: EdgeInsets.zero),
+                  CheckboxListTile(title: const Text('Цена (прайс)'), value: incBasePrice, onChanged: (v) => setModalState(() => incBasePrice = v!), dense: true, contentPadding: EdgeInsets.zero),
+                  CheckboxListTile(title: const Text('Скидка, %'), value: incDiscount, onChanged: (v) => setModalState(() => incDiscount = v!), dense: true, contentPadding: EdgeInsets.zero),
+                  CheckboxListTile(title: const Text('Цена'), value: incFinalPrice, onChanged: (v) => setModalState(() => incFinalPrice = v!), dense: true, contentPadding: EdgeInsets.zero),
+                  CheckboxListTile(title: const Text('Норма расхода'), value: incRate, onChanged: (v) => setModalState(() => incRate = v!), dense: true, contentPadding: EdgeInsets.zero),
+                  CheckboxListTile(title: const Text('Площадь, га'), value: incArea, onChanged: (v) => setModalState(() => incArea = v!), dense: true, contentPadding: EdgeInsets.zero),
+                  CheckboxListTile(title: const Text('Требуемый объем'), value: incVolume, onChanged: (v) => setModalState(() => incVolume = v!), dense: true, contentPadding: EdgeInsets.zero),
+                  CheckboxListTile(title: const Text('Стоимость позиции'), value: incTotal, onChanged: (v) => setModalState(() => incTotal = v!), dense: true, contentPadding: EdgeInsets.zero),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, null), child: const Text('Отмена')),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(ctx, {
+                  'name': incName, 'basePrice': incBasePrice, 'discount': incDiscount,
+                  'finalPrice': incFinalPrice, 'rate': incRate, 'area': incArea,
+                  'volume': incVolume, 'total': incTotal,
+                }), 
+                child: const Text('Продолжить')
+              ),
+            ],
+          );
+        }
+      ),
+    );
+  }
+
   Future<void> _loadOrders() async {
     setState(() => _isLoading = true);
     
@@ -219,7 +269,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
     );
   }
   // Генерация байтов Excel (для отправки и сохранения)
-  Uint8List _generateOrderExcelBytes(Order order) {
+  Uint8List _generateOrderExcelBytes(Order order, Map<String, bool> columns) {
     final excel = Excel.createExcel();
     final Sheet sheet = excel['Заказ'];
     if (excel.sheets.containsKey('Sheet1')) excel.delete('Sheet1');
@@ -230,23 +280,45 @@ class _OrdersScreenState extends State<OrdersScreen> {
     sheet.appendRow([TextCellValue('Дата:'), TextCellValue(dateStr), TextCellValue('Статус:'), TextCellValue(order.status)]);
     sheet.appendRow([TextCellValue('')]); 
 
-    sheet.appendRow([
-      TextCellValue('Наименование'), TextCellValue('Цена (базовая)'), TextCellValue('Скидка, %'),
-      TextCellValue('Цена со скидкой'), TextCellValue('Норма расхода'), TextCellValue('Площадь, га'),
-      TextCellValue('Требуемый объем'), TextCellValue('Стоимость')
-    ]);
+    // Формируем заголовки
+    List<TextCellValue> headers = [];
+    if (columns['name']!) headers.add(TextCellValue('Наименование'));
+    if (columns['basePrice']!) headers.add(TextCellValue('Цена (прайс)'));
+    if (columns['discount']!) headers.add(TextCellValue('Скидка, %'));
+    if (columns['finalPrice']!) headers.add(TextCellValue('Цена'));
+    if (columns['rate']!) headers.add(TextCellValue('Норма расхода'));
+    if (columns['area']!) headers.add(TextCellValue('Площадь, га'));
+    if (columns['volume']!) headers.add(TextCellValue('Требуемый объем'));
+    if (columns['total']!) headers.add(TextCellValue('Стоимость'));
 
+    if (headers.isEmpty) throw Exception('Не выбрано ни одной колонки');
+    sheet.appendRow(headers);
+
+    // Заполняем строки
     for (var item in order.items) {
-      sheet.appendRow([
-        TextCellValue(item.productName), DoubleCellValue(item.basePrice), DoubleCellValue(item.discountPercent),
-        DoubleCellValue(item.discountedPrice), DoubleCellValue(item.rate), DoubleCellValue(item.area),
-        TextCellValue('${item.requiredVolume.toStringAsFixed(2)} ${item.packageUnit}'), DoubleCellValue(item.totalPrice)
-      ]);
+      List<CellValue?> rowData = [];
+      if (columns['name']!) rowData.add(TextCellValue(item.productName));
+      if (columns['basePrice']!) rowData.add(DoubleCellValue(item.basePrice));
+      if (columns['discount']!) rowData.add(DoubleCellValue(item.discountPercent));
+      if (columns['finalPrice']!) rowData.add(DoubleCellValue(item.discountedPrice));
+      if (columns['rate']!) rowData.add(DoubleCellValue(item.rate));
+      if (columns['area']!) rowData.add(DoubleCellValue(item.area));
+      if (columns['volume']!) rowData.add(TextCellValue('${item.requiredVolume.toStringAsFixed(2)} ${item.packageUnit}'));
+      if (columns['total']!) rowData.add(DoubleCellValue(item.totalPrice));
+      sheet.appendRow(rowData);
     }
 
-    List<CellValue?> totalRow = [TextCellValue(''), TextCellValue(''), TextCellValue(''), TextCellValue(''), TextCellValue(''), TextCellValue(''), TextCellValue('')];
-    totalRow.add(DoubleCellValue(order.totalAmount)); 
-    sheet.appendRow(totalRow);
+    // Итоговая строка (только если выбрана колонка "Стоимость")
+    if (columns['total']!) {
+      List<CellValue?> totalRow = List.generate(headers.length - 1, (_) => TextCellValue(''));
+      totalRow.add(DoubleCellValue(order.totalAmount)); 
+      sheet.appendRow(totalRow);
+    }
+
+    if (order.notes != null && order.notes!.isNotEmpty) {
+      sheet.appendRow([TextCellValue('')]);
+      sheet.appendRow([TextCellValue('Примечание:'), TextCellValue(order.notes!)]);
+    }
 
     final bytes = excel.save();
     if (bytes == null) throw Exception('Ошибка генерации файла');
@@ -255,8 +327,11 @@ class _OrdersScreenState extends State<OrdersScreen> {
 
   // Отправка в мессенджер
   Future<void> _shareOrderToMessenger(Order order) async {
+    final columns = await _showColumnsSelectionDialog();
+    if (columns == null) return; // Пользователь отменил выбор
+
     try {
-      final bytes = _generateOrderExcelBytes(order);
+      final bytes = _generateOrderExcelBytes(order, columns);
       final tempDir = await getTemporaryDirectory();
       final dateStr = '${order.orderDate.day}.${order.orderDate.month}.${order.orderDate.year}';
       final file = File('${tempDir.path}/Заказ_${order.id}_$dateStr.xlsx');
@@ -275,7 +350,7 @@ class _OrdersScreenState extends State<OrdersScreen> {
     }
   }
 
-    void _showOrderActions(BuildContext context, Order order) {
+  void _showOrderActions(BuildContext context, Order order) {
     final isDraft = order.id == null;
     
     // Определяем, является ли текущий заказ активным
@@ -690,112 +765,17 @@ class _OrdersScreenState extends State<OrdersScreen> {
 
   // Метод экспорта остается без изменений
   Future<void> _exportOrderToExcel(Order order) async {
-    // ... (код экспорта из вашего предыдущего файла) ...
-    bool incName = true;
-    bool incBasePrice = true;
-    bool incDiscount = true;
-    bool incFinalPrice = true;
-    bool incRate = true;
-    bool incArea = true;
-    bool incVolume = true;
-    bool incTotal = true;
-
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setModalState) {
-          return AlertDialog(
-            title: const Text('Экспорт заказа в Excel'),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('Выберите колонки для выгрузки:', style: TextStyle(fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 8),
-                  CheckboxListTile(title: const Text('Наименование'), value: incName, onChanged: (v) => setModalState(() => incName = v!), dense: true),
-                  CheckboxListTile(title: const Text('Цена (базовая)'), value: incBasePrice, onChanged: (v) => setModalState(() => incBasePrice = v!), dense: true),
-                  CheckboxListTile(title: const Text('Скидка, %'), value: incDiscount, onChanged: (v) => setModalState(() => incDiscount = v!), dense: true),
-                  CheckboxListTile(title: const Text('Цена со скидкой'), value: incFinalPrice, onChanged: (v) => setModalState(() => incFinalPrice = v!), dense: true),
-                  CheckboxListTile(title: const Text('Норма расхода'), value: incRate, onChanged: (v) => setModalState(() => incRate = v!), dense: true),
-                  CheckboxListTile(title: const Text('Площадь, га'), value: incArea, onChanged: (v) => setModalState(() => incArea = v!), dense: true),
-                  CheckboxListTile(title: const Text('Требуемый объем'), value: incVolume, onChanged: (v) => setModalState(() => incVolume = v!), dense: true),
-                  CheckboxListTile(title: const Text('Стоимость позиции'), value: incTotal, onChanged: (v) => setModalState(() => incTotal = v!), dense: true),
-                ],
-              ),
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
-              ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Экспортировать')),
-            ],
-          );
-        }
-      ),
-    );
-
-    if (result != true) return;
-
-    List<TextCellValue> headers = [];
-    if (incName) headers.add(TextCellValue('Наименование'));
-    if (incBasePrice) headers.add(TextCellValue('Цена (базовая)'));
-    if (incDiscount) headers.add(TextCellValue('Скидка, %'));
-    if (incFinalPrice) headers.add(TextCellValue('Цена со скидкой'));
-    if (incRate) headers.add(TextCellValue('Норма расхода'));
-    if (incArea) headers.add(TextCellValue('Площадь, га'));
-    if (incVolume) headers.add(TextCellValue('Требуемый объем'));
-    if (incTotal) headers.add(TextCellValue('Стоимость'));
-
-    if (headers.isEmpty) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Выберите хотя бы одну колонку')));
-      return;
-    }
+    final columns = await _showColumnsSelectionDialog();
+    if (columns == null) return; // Отмена
 
     showDialog(context: context, barrierDismissible: false, builder: (ctx) => const AlertDialog(content: Row(children: [CircularProgressIndicator(), SizedBox(width: 20), Text('Генерация Excel...')])));
 
     try {
-      final excel = Excel.createExcel();
-      final Sheet sheet = excel['Заказ'];
-      if (excel.sheets.containsKey('Sheet1')) excel.delete('Sheet1');
+      final uint8Bytes = _generateOrderExcelBytes(order, columns);
+
+      if (mounted) Navigator.of(context, rootNavigator: true).pop(); // Закрываем прогресс
 
       final dateStr = '${order.orderDate.day}.${order.orderDate.month}.${order.orderDate.year}';
-      sheet.appendRow([TextCellValue('Заказ №${order.id ?? "Черновик"}')]);
-      sheet.appendRow([TextCellValue('Клиент:'), TextCellValue(order.clientName)]);
-      sheet.appendRow([TextCellValue('Дата:'), TextCellValue(dateStr), TextCellValue('Статус:'), TextCellValue(order.status)]);
-      sheet.appendRow([TextCellValue('')]); 
-
-      sheet.appendRow(headers);
-
-      for (var item in order.items) {
-        List<CellValue?> rowData = [];
-        if (incName) rowData.add(TextCellValue(item.productName));
-        if (incBasePrice) rowData.add(DoubleCellValue(item.basePrice));
-        if (incDiscount) rowData.add(DoubleCellValue(item.discountPercent));
-        if (incFinalPrice) rowData.add(DoubleCellValue(item.discountedPrice));
-        if (incRate) rowData.add(DoubleCellValue(item.rate));
-        if (incArea) rowData.add(DoubleCellValue(item.area));
-        if (incVolume) rowData.add(TextCellValue('${item.requiredVolume.toStringAsFixed(2)} ${item.packageUnit}'));
-        if (incTotal) rowData.add(DoubleCellValue(item.totalPrice));
-        
-        sheet.appendRow(rowData);
-      }
-
-      List<CellValue?> totalRow = [];
-      for (int i = 0; i < headers.length - 1; i++) {
-        totalRow.add(TextCellValue('')); 
-      }
-      totalRow.add(DoubleCellValue(order.totalAmount)); 
-      sheet.appendRow(totalRow);
-
-      if (order.notes != null && order.notes!.isNotEmpty) {
-        sheet.appendRow([TextCellValue('')]);
-        sheet.appendRow([TextCellValue('Примечание:'), TextCellValue(order.notes!)]);
-      }
-
-      final bytes = excel.save();
-      if (bytes == null) throw Exception('Ошибка генерации файла');
-
-      if (mounted) Navigator.of(context, rootNavigator: true).pop();
-
-      final uint8Bytes = Uint8List.fromList(bytes);
       final defaultFileName = 'order_${order.id ?? 'draft'}_$dateStr.xlsx';
 
       final Uri? outputUri = await FilePicker.saveFile(

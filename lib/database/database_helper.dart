@@ -32,8 +32,9 @@ class DatabaseHelper {
     return openDatabase(
       dbPath,
       password: password,
-      version: 1,
+      version: 2, // <-- БЫЛО 1, СТАЛО 2
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade, // <-- ДОБАВИТЬ ЭТО
       onConfigure: _onConfigure,
     );
   }
@@ -114,6 +115,22 @@ class DatabaseHelper {
         FOREIGN KEY (product_id) REFERENCES products (id) ON DELETE SET NULL
       )
     ''');
+
+    // НОВОЕ:
+    await db.execute('CREATE TABLE active_ingredients (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE)');
+    await db.execute('''
+      CREATE TABLE product_active_ingredients(
+        product_id INTEGER,
+        active_ingredient_id INTEGER,
+        concentration REAL,
+        unit TEXT,
+        PRIMARY KEY (product_id, active_ingredient_id),
+        FOREIGN KEY (product_id) REFERENCES products (id) ON DELETE CASCADE,
+        FOREIGN KEY (active_ingredient_id) REFERENCES active_ingredients (id) ON DELETE CASCADE
+      )
+    ''');
+    await db.execute('CREATE INDEX idx_prod_ai_product ON product_active_ingredients(product_id)');
+    await db.execute('CREATE INDEX idx_prod_ai_ai ON product_active_ingredients(active_ingredient_id)');
   
     // Индексы для ускорения связей и поиска
     await db.execute('CREATE INDEX idx_products_category ON products(category_id)');
@@ -122,6 +139,29 @@ class DatabaseHelper {
     await db.execute('CREATE INDEX idx_order_items_product ON order_items(product_id)');
     await db.execute('CREATE INDEX idx_product_cultures_product ON product_cultures(product_id)');
     await db.execute('CREATE INDEX idx_product_diseases_product ON product_diseases(product_id)');
+    
+  }
+
+  Future _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      // Создаем таблицы для действующих веществ
+      await db.execute('CREATE TABLE IF NOT EXISTS active_ingredients (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE)');
+      
+      await db.execute('''
+        CREATE TABLE IF NOT EXISTS product_active_ingredients(
+          product_id INTEGER,
+          active_ingredient_id INTEGER,
+          concentration REAL,
+          unit TEXT,
+          PRIMARY KEY (product_id, active_ingredient_id),
+          FOREIGN KEY (product_id) REFERENCES products (id) ON DELETE CASCADE,
+          FOREIGN KEY (active_ingredient_id) REFERENCES active_ingredients (id) ON DELETE CASCADE
+        )
+      ''');
+      
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_prod_ai_product ON product_active_ingredients(product_id)');
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_prod_ai_ai ON product_active_ingredients(active_ingredient_id)');
+    }
   }
 
   // ВАЖНО: Используем DatabaseExecutor, чтобы принимать и Database, и Transaction
@@ -133,6 +173,25 @@ class DatabaseHelper {
       return res.first['id'] as int;
     } else {
       return await db.insert(table, {'name': cleanName});
+    }
+  }
+
+ // Метод для сохранения связей ДВ
+  Future<void> _saveProductActiveIngredients(DatabaseExecutor db, int productId, List<ProductActiveIngredient> ingredients) async {
+    // Если список пуст, НЕ удаляем старые связи (чтобы не стереть данные при обновлении цен)
+    if (ingredients.isEmpty) return;
+    
+    await db.delete('product_active_ingredients', where: 'product_id = ?', whereArgs: [productId]);
+
+    for (var ing in ingredients) {
+      if (ing.name.trim().isEmpty) continue;
+      int aiId = await _getOrCreateActiveIngredientId(db, ing.name);
+      await db.insert('product_active_ingredients', {
+        'product_id': productId,
+        'active_ingredient_id': aiId,
+        'concentration': ing.concentration,
+        'unit': ing.unit,
+      }, conflictAlgorithm: ConflictAlgorithm.replace);
     }
   }
 
@@ -162,6 +221,7 @@ class DatabaseHelper {
       int disId = await _getOrCreateId(db, 'diseases', disease);
       await db.insert('product_diseases', {'product_id': productId, 'disease_id': disId}, conflictAlgorithm: ConflictAlgorithm.ignore);
     }
+    await _saveProductActiveIngredients(db, productId, product.activeIngredients);
     return productId;
   }
 
@@ -192,6 +252,9 @@ class DatabaseHelper {
     for (var disease in product.diseases) {
       int disId = await _getOrCreateId(db, 'diseases', disease);
       await db.insert('product_diseases', {'product_id': product.id, 'disease_id': disId}, conflictAlgorithm: ConflictAlgorithm.ignore);
+    }
+    if (product.id != null) {
+      await _saveProductActiveIngredients(db, product.id!, product.activeIngredients);
     }
     return res;
   }
@@ -252,6 +315,22 @@ class DatabaseHelper {
   Future<int> deleteProduct(int id) async {
     Database db = await database;
     return await db.delete('products', where: 'id = ?', whereArgs: [id]);
+  }
+
+    /// Удаляет список препаратов по их ID.
+  /// Благодаря ON DELETE CASCADE, связи с культурами/болезнями удалятся автоматически,
+  /// а в заказах (order_items) product_id станет NULL (история сохранится).
+  Future<void> deleteProducts(List<int> ids) async {
+    if (ids.isEmpty) return;
+    Database db = await database;
+    
+    // Формируем запрос вида: DELETE FROM products WHERE id IN (?, ?, ?)
+    final placeholders = List.filled(ids.length, '?').join(',');
+    await db.delete(
+      'products',
+      where: 'id IN ($placeholders)',
+      whereArgs: ids,
+    );
   }
 
   Future<void> deleteAllProducts() async {
@@ -632,6 +711,21 @@ class DatabaseHelper {
     return await _updateSingleProduct(executor, product);
   }
 
+  Future<List<String>> getUniqueActiveIngredients() async {
+    final db = await database;
+    final rows = await db.query('active_ingredients', orderBy: 'name');
+    return rows.map((r) => r['name'] as String).toList();
+  }
+
+  Future<int> _getOrCreateActiveIngredientId(DatabaseExecutor db, String name) async {
+    final cleanName = name.trim();
+    final res = await db.query('active_ingredients', columns: ['id'], where: 'name = ?', whereArgs: [cleanName]);
+    if (res.isNotEmpty) {
+      return res.first['id'] as int;
+    } else {
+      return await db.insert('active_ingredients', {'name': cleanName});
+    }
+  }
     // ==========================================
   // УПРАВЛЕНИЕ СЛОВАРЯМИ
   // ==========================================
@@ -651,6 +745,9 @@ class DatabaseHelper {
     } else if (dictType == 'diseases') {
       final res = await db.rawQuery('SELECT COUNT(*) as cnt FROM product_diseases WHERE disease_id = ?', [id]);
       count = res.first['cnt'] as int;
+    } else if (dictType == 'active_ingredients') { // <-- НОВОЕ
+      final res = await db.rawQuery('SELECT COUNT(*) as cnt FROM product_active_ingredients WHERE active_ingredient_id = ?', [id]);
+      count = res.first['cnt'] as int;
     }
     return count;
   }
@@ -659,33 +756,32 @@ class DatabaseHelper {
   /// Возвращает список ошибок (если были).
   Future<List<String>> saveDictChanges(
     String dictType,
-    List<EditableDictItem> items, // Измененные и удаленные элементы
+    List<EditableDictItem> items,
   ) async {
     Database db = await database;
     List<String> errors = [];
 
     await db.transaction((txn) async {
       for (var item in items) {
-        if (item.id == null) continue; // Новые записи мы пока не создаем
+        if (item.id == null) continue;
 
         // 1. УДАЛЕНИЕ
         if (item.isDeleted) {
           if (dictType == 'categories') {
-            // Для категорий сначала отвязываем препараты (иначе FOREIGN KEY не даст удалить)
             await txn.update('products', {'category_id': null}, where: 'category_id = ?', whereArgs: [item.id]);
             await txn.delete('categories', where: 'id = ?', whereArgs: [item.id]);
           } else if (dictType == 'cultures') {
-            // Для культур работает ON DELETE CASCADE
             await txn.delete('cultures', where: 'id = ?', whereArgs: [item.id]);
           } else if (dictType == 'diseases') {
             await txn.delete('diseases', where: 'id = ?', whereArgs: [item.id]);
+          } else if (dictType == 'active_ingredients') { // <-- НОВОЕ
+            await txn.delete('active_ingredients', where: 'id = ?', whereArgs: [item.id]);
           }
         }
         // 2. ПЕРЕИМЕНОВАНИЕ / СЛИЯНИЕ
         else if (item.isModified) {
           final newName = item.newName.trim();
           
-          // Ищем, нет ли уже записи с таким именем (Слияние)
           final existing = await txn.query(dictType, columns: ['id'], where: 'name = ?', whereArgs: [newName]);
           
           if (existing.isNotEmpty) {
@@ -693,16 +789,18 @@ class DatabaseHelper {
             final targetId = existing.first['id'] as int;
             
             if (dictType == 'categories') {
-              // Перепривязываем препараты
               await txn.update('products', {'category_id': targetId}, where: 'category_id = ?', whereArgs: [item.id]);
               await txn.delete('categories', where: 'id = ?', whereArgs: [item.id]);
             } else if (dictType == 'cultures') {
-              // Перепривязываем связи (OR IGNORE защитит от дублей связи)
               await txn.rawUpdate('UPDATE OR IGNORE product_cultures SET culture_id = ? WHERE culture_id = ?', [targetId, item.id]);
               await txn.delete('cultures', where: 'id = ?', whereArgs: [item.id]);
             } else if (dictType == 'diseases') {
               await txn.rawUpdate('UPDATE OR IGNORE product_diseases SET disease_id = ? WHERE disease_id = ?', [targetId, item.id]);
               await txn.delete('diseases', where: 'id = ?', whereArgs: [item.id]);
+            } else if (dictType == 'active_ingredients') { // <-- НОВОЕ
+              // Перепривязываем связи (OR IGNORE защитит от дублей, если у препарата уже есть это вещество)
+              await txn.rawUpdate('UPDATE OR IGNORE product_active_ingredients SET active_ingredient_id = ? WHERE active_ingredient_id = ?', [targetId, item.id]);
+              await txn.delete('active_ingredients', where: 'id = ?', whereArgs: [item.id]);
             }
           } else {
             // ПРОСТОЕ ПЕРЕИМЕНОВАНИЕ
